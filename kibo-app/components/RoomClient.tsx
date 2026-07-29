@@ -33,38 +33,52 @@ export default function RoomClient({ code }: { code: string }) {
 
   useEffect(() => {
     if (!supabase || status !== 'ready' || !userId) return;
-    // join_room is idempotent, but StrictMode's double-invoke would otherwise
-    // fire two RPCs on every mount in dev.
+    // join_room is idempotent, but there is no reason to fire two RPCs per
+    // mount in dev. As in AuthProvider, this run-once guard must NOT be paired
+    // with an abort-on-cleanup flag: under StrictMode the guard blocks the
+    // retry while the flag discards the first result, and the join never
+    // resolves.
     if (joinedRef.current) return;
     joinedRef.current = true;
 
-    let active = true;
     setJoin({ phase: 'joining' });
 
+    // Never hang silently. Without this, any rejection or stalled request
+    // leaves the page on "Filling the tank..." forever with nothing to go on.
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) setJoin({ phase: 'error', error: 'timeout' });
+    }, 15_000);
+
     void (async () => {
-      const { data, error } = await supabase.rpc('join_room', {
-        room_code: normalized,
-      });
-      if (!active) return;
+      try {
+        const { data, error } = await supabase.rpc('join_room', {
+          room_code: normalized,
+        });
 
-      // A raised error means no session at all. Everything else — unknown
-      // code, full room, throttled — comes back as a status row, so that the
-      // rate-limiter's ledger write survives the transaction.
-      if (error) {
-        setJoin({ phase: 'error', error: toRoomError(error.message) });
-        return;
+        // A raised error means no session at all. Everything else — unknown
+        // code, full room, throttled — comes back as a status row, so that the
+        // rate-limiter's ledger write survives the transaction.
+        if (error) {
+          setJoin({ phase: 'error', error: toRoomError(error.message) });
+          return;
+        }
+        const row = (data as JoinRoomRow[] | null)?.[0];
+        if (!row || row.status !== 'ok' || !row.joined_room) {
+          setJoin({ phase: 'error', error: joinStatusToError(row?.status) });
+          return;
+        }
+        setJoin({ phase: 'ready', roomId: row.joined_room });
+      } catch (cause) {
+        // supabase-js normally resolves with {error}, but a network-level
+        // failure rejects. Surface it instead of stalling.
+        console.error('join_room failed', cause);
+        setJoin({ phase: 'error', error: 'unknown' });
+      } finally {
+        settled = true;
+        clearTimeout(timer);
       }
-      const row = (data as JoinRoomRow[] | null)?.[0];
-      if (!row || row.status !== 'ok' || !row.joined_room) {
-        setJoin({ phase: 'error', error: joinStatusToError(row?.status) });
-        return;
-      }
-      setJoin({ phase: 'ready', roomId: row.joined_room });
     })();
-
-    return () => {
-      active = false;
-    };
   }, [supabase, status, userId, normalized]);
 
   const roomId = join.phase === 'ready' ? join.roomId : null;
@@ -121,7 +135,10 @@ export default function RoomClient({ code }: { code: string }) {
         />
       ) : (
         <div className="flex h-full items-center justify-center">
-          <p className="text-sm text-white/50">Filling the tank…</p>
+          {/* Distinct copy per stage, so a stall says which step it stalled on. */}
+          <p className="text-sm text-white/50">
+            {status === 'loading' ? 'Connecting…' : 'Filling the tank…'}
+          </p>
         </div>
       )}
 

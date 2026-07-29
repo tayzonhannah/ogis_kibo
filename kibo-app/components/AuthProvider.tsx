@@ -46,13 +46,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!hasSupabaseEnv) return;
 
-    // StrictMode double-invokes effects in dev; signing in twice would create
-    // a second anonymous user and burn a room slot.
+    // Run once per tab: signing in twice would create a second anonymous user
+    // and burn a room slot.
     if (startedRef.current) return;
     startedRef.current = true;
 
+    // Deliberately NO abort flag and no cleanup here. Pairing a run-once guard
+    // with an `active = false` cleanup deadlocks under StrictMode's dev
+    // double-invoke: the first pass launches the sign-in, the cleanup marks it
+    // abandoned, the second pass returns early on the guard, and the in-flight
+    // sign-in then discards its own result. Auth would sit on `loading`
+    // forever. setState on an unmounted component is a harmless no-op in
+    // React 18+, so there is nothing to guard against.
     const supabase = createClient();
-    let active = true;
 
     void (async () => {
       try {
@@ -65,11 +71,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           userId = signedIn.user?.id ?? null;
         }
 
-        if (!active) return;
         if (!userId) throw new Error('Anonymous sign-in returned no user.');
         setState({ status: 'ready', userId, error: null });
       } catch (cause) {
-        if (!active) return;
         const message =
           cause instanceof Error ? cause.message : 'Could not sign in.';
         setState({
@@ -83,10 +87,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
       }
     })();
-
-    return () => {
-      active = false;
-    };
   }, []);
 
   const value = useMemo<AuthContextValue>(

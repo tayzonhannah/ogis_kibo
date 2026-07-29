@@ -81,6 +81,7 @@ export type RoomError =
   | 'room_full'
   | 'too_many_attempts'
   | 'not_authenticated'
+  | 'timeout'
   | 'unknown';
 
 const KNOWN_ROOM_ERRORS: RoomError[] = [
@@ -107,5 +108,8 @@ export const ROOM_ERROR_COPY: Record<RoomError, string> = {
   room_full: 'That tank already has two people in it.',
   too_many_attempts: 'Too many tries. Wait a few minutes before trying again.',
   not_authenticated: 'Still connecting. Give it a second and try again.',
+  timeout:
+    "The tank didn't answer. Check that both SQL migrations have run, and that " +
+    'your dev server was restarted after .env.local was created.',
   unknown: 'Something went wrong reaching the tank.',
 };
