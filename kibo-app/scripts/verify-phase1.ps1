@@ -96,9 +96,9 @@ Write-Host "=== 0. Which migration is actually live?"
 $ver = (Req 'POST' "$base/rest/v1/rpc/kibo_schema_version" '{}' $null)
 $live = if ($ver.code -eq 200) { ($ver.body | ConvertFrom-Json) } else { "unavailable ($($ver.code))" }
 Write-Host "         deployed schema version: $live"
-if ($live -ne '0003') {
-  Write-Host "  [STOP] Expected 0003. The migration file has not been applied."
-  Write-Host "         Re-run kibo-app/supabase/migrations/0002_join_room_returns_status.sql"
+if ($live -ne '0004') {
+  Write-Host "  [STOP] Expected 0004. A migration has not been applied."
+  Write-Host "         Run the migrations in kibo-app/supabase/migrations/ in order."
   exit 2
 }
 Write-Host "  [PASS] migration 0003 is live"
@@ -215,10 +215,20 @@ $theirs = JArr (Req 'GET' "$base/rest/v1/memos?select=id" $null $C).body
 Check 'memos are NOT readable by a non-member' ($theirs.Count -eq 0) "$($theirs.Count)"
 
 $memoId = $mine[0].id
+# Retraction goes through an RPC, not a client UPDATE: setting deleted_at hides
+# the row from the SELECT policy that PostgREST has to read it back through, so
+# a direct UPDATE always fails with 42501. See migration 0004.
 $r = Req 'PATCH' "$base/rest/v1/memos?id=eq.$memoId" '{"deleted_at":"2026-01-01T00:00:00Z"}' $A
-Check 'either participant can retract a memo' ($r.code -lt 300) "$($r.code) $($r.body)"
+Check 'direct client soft-delete is refused (no UPDATE grant)' ($r.code -ge 400) "$($r.code) $($r.body)"
+
+$r = Rpc 'retract_memo' (@{ target_memo = $memoId } | ConvertTo-Json -Compress) $A
+Check 'either participant can retract a memo via RPC' ($r.code -lt 300) "$($r.code) $($r.body)"
 $after = JArr (Req 'GET' "$base/rest/v1/memos?select=id&id=eq.$memoId" $null $A).body
 Check 'a retracted memo disappears from reads' ($after.Count -eq 0) "$($after.Count)"
+$r = Rpc 'retract_memo' (@{ target_memo = $memoId } | ConvertTo-Json -Compress) $A
+Check 'retracting twice is a harmless no-op' ($r.code -lt 300) "$($r.code) $($r.body)"
+$r = Rpc 'retract_memo' (@{ target_memo = $memoId } | ConvertTo-Json -Compress) $C
+Check 'a non-member cannot retract a memo' ($r.body -match 'not_a_member') "$($r.code) $($r.body)"
 
 Write-Host "`n=== 11. Join rate limit (10 failures / 15 min)"
 $D = NewUser 'D'

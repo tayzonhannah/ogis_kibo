@@ -269,10 +269,19 @@ create policy "members read memos" on memos
   for select using (is_member(room_id) and deleted_at is null);
 create policy "members write memos" on memos
   for insert with check (is_member(room_id) and author = auth.uid());
--- Either participant can retract any memo in their room. For a two-person
--- space this is the proportionate moderation path — no report queue needed.
-create policy "members retract memos" on memos
-  for update using (is_member(room_id)) with check (is_member(room_id));
+-- NO update policy on memos, deliberately. Retraction goes through the
+-- retract_memo() definer function instead — see migration 0004.
+--
+-- A client UPDATE cannot soft-delete a row when the SELECT policy filters
+-- soft-deleted rows out: setting deleted_at hides the row from the very policy
+-- PostgREST reads the updated row back through, and the write fails with 42501
+-- "new row violates row-level security policy". Isolating the predicate proves
+-- it — `deleted_at = null` returns 204 while a timestamp returns 403, even
+-- though the WITH CHECK never mentions deleted_at.
+--
+-- Either stop hiding them in the policy and filter in every query, or move the
+-- write into a definer function. This build does the latter, so no query can
+-- forget to filter.
 ```
 
 There are deliberately **no INSERT policies** on `rooms`, `room_participants`, or `fish`. All creation goes through the `security definer` RPCs below, so the capacity cap and rate limit cannot be bypassed by writing directly to the table.
@@ -789,7 +798,7 @@ Mood names are still the placeholders `calm / deep / bright / murky / warm`, pen
 - **Transport:** insert into `memos`, then broadcast for immediate delivery. Same fast-path/truth-path split as fish — a memo that evaporates because the partner wasn't looking undercuts the premise.
 - **Rate limit:** add a `before insert` trigger rejecting more than ~10 memos per author per minute. The insert policy authorizes *who*, not *how often*.
 - **Canvas:** render text inside a floating bubble in the render loop. `ctx.fillText` is not an HTML injection surface, but still clip to the bubble and store each bubble's current bounds on the memo object so clicks can be hit-tested.
-- **Retract:** either participant can soft-delete any memo in the room (`update memos set deleted_at = now()`). For a two-person space this is the whole moderation story; cleanup drops tombstones after 7 days.
+- **Retract:** either participant can retract either person's memo, via the `retract_memo()` RPC (not a client UPDATE — see the policy note in Phase 1). For a two-person space this is the whole moderation story; cleanup drops tombstones after 7 days. **The gesture is not built yet** — the RPC and its authorisation are verified, but nothing in the UI calls it. It needs a design decision: which gesture retracts (tap already sends a heart), and whether the affordance appears for both people or only the author.
 - **Reply:** clicking a bubble sends a heart back over broadcast.
 - **Backlog:** on subscribe, the five most recent memos are loaded as bubbles, so arriving later still shows you what was left.
 
