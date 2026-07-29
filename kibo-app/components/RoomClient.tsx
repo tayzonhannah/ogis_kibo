@@ -5,8 +5,10 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import Aquarium from '@/components/Aquarium';
+import NutrientMeter from '@/components/NutrientMeter';
 import TankControls from '@/components/TankControls';
 import { useAuth } from '@/components/AuthProvider';
+import { useCoAway } from '@/lib/useCoAway';
 import { useHeartbeat } from '@/lib/useHeartbeat';
 import { normalizeCode, type TankMood } from '@/lib/constants';
 import {
@@ -31,6 +33,13 @@ export default function RoomClient({ code }: { code: string }) {
   const [peerPresent, setPeerPresent] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mood, setMood] = useState<TankMood>('calm');
+  // Kept separate from `mood` rather than holding the whole RoomRow: the mood
+  // pick is optimistic and has to apply before the initial fetch resolves,
+  // which a single nullable row object cannot express.
+  const [nutrients, setNutrients] = useState<{
+    seconds: number;
+    coAwaySince: string | null;
+  }>({ seconds: 0, coAwaySince: null });
   const [channel, setChannel] = useState<RealtimeChannel | null>(null);
   const joinedRef = useRef(false);
 
@@ -88,19 +97,50 @@ export default function RoomClient({ code }: { code: string }) {
 
   const roomId = join.phase === 'ready' ? join.roomId : null;
   useHeartbeat(supabase, roomId, userId);
+  useCoAway(supabase, roomId, userId);
 
-  // Initial mood. Live changes arrive via Aquarium's rooms listener below.
+  // Initial room state. Live changes arrive via Aquarium's rooms listener below.
+  //
+  // Re-read on returning to the tab as well, because the interesting changes
+  // happen precisely while nobody is watching: a mobile tab that was
+  // backgrounded lost its websocket, so realtime has a gap exactly where the
+  // nutrient credit landed.
   useEffect(() => {
     if (!supabase || !roomId) return;
-    void (async () => {
+
+    let active = true;
+
+    const load = async () => {
       const { data } = await supabase
         .from('rooms')
-        .select('tank_mood')
+        .select('tank_mood, nutrient_seconds, co_away_since')
         .eq('id', roomId)
         .single();
-      const next = (data as Pick<RoomRow, 'tank_mood'> | null)?.tank_mood;
-      if (next) setMood(next);
-    })();
+      if (!active || !data) return;
+      const row = data as Pick<
+        RoomRow,
+        'tank_mood' | 'nutrient_seconds' | 'co_away_since'
+      >;
+      if (row.tank_mood) setMood(row.tank_mood);
+      setNutrients({
+        seconds: row.nutrient_seconds,
+        coAwaySince: row.co_away_since,
+      });
+    };
+
+    void load();
+
+    // This races useCoAway's hidden_since write, and harmlessly: whichever side
+    // of the credit we read, liveNutrientSeconds renders the same total.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      active = false;
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [supabase, roomId]);
 
   // These three must be referentially stable: they are dependencies of
@@ -116,6 +156,10 @@ export default function RoomClient({ code }: { code: string }) {
 
   const handleRoomUpdate = useCallback((row: RoomRow) => {
     if (row.tank_mood) setMood(row.tank_mood);
+    setNutrients({
+      seconds: row.nutrient_seconds,
+      coAwaySince: row.co_away_since,
+    });
   }, []);
 
   const leave = async () => {
@@ -196,6 +240,10 @@ export default function RoomClient({ code }: { code: string }) {
           >
             {copied ? 'link copied' : normalized}
           </button>
+          <NutrientMeter
+            bankedSeconds={nutrients.seconds}
+            coAwaySince={nutrients.coAwaySince}
+          />
         </div>
 
         <div className="kibo-fade-in pointer-events-auto flex items-center gap-4">
