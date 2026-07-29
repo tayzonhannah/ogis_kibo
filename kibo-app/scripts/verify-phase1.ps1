@@ -19,9 +19,19 @@ $envFile = Join-Path $PSScriptRoot '..\.env.local'
 if (-not (Test-Path $envFile)) { throw "Missing $envFile - copy .env.local.example and fill it in." }
 $envLines = Get-Content $envFile
 function EnvVal($name) {
-  $line = ($envLines | Select-String "^$name=").Line
+  # Same dotenv tolerance as verify-phase4.ps1: leading whitespace, an `export`
+  # prefix, a quoted value. "^NAME=" misses a line indented by one space and
+  # reports the key as missing while it sits there in the file.
+  $pattern = "^\s*(?:export\s+)?$([regex]::Escape($name))\s*="
+  $line = ($envLines | Where-Object { $_ -match $pattern } | Select-Object -First 1)
   if (-not $line) { throw "Missing $name in .env.local" }
-  return ($line -replace "^$name=", '').Trim()
+  $value = ($line -replace $pattern, '').Trim()
+  if ($value.Length -ge 2 -and (
+      ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+      ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+    $value = $value.Substring(1, $value.Length - 2)
+  }
+  return $value
 }
 $base = (EnvVal 'NEXT_PUBLIC_SUPABASE_URL').TrimEnd('/')
 $anon = EnvVal 'NEXT_PUBLIC_SUPABASE_ANON_KEY'

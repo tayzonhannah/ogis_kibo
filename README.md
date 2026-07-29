@@ -19,9 +19,13 @@ whether or not anyone says anything.
 | 0 | Next.js + Supabase setup, env, clients | Built |
 | 1 | Schema, RLS, column grants, room join RPCs | Built |
 | 2 | Canvas, presence, fish handoff | Built |
-| 3 | Send Warmth, emotional weather, memos | Specced |
-| 4 | Phone-off continuity / nutrient score | Specced |
+| 3 | Send Warmth, emotional weather, memos | Built |
+| 4 | Phone-off continuity / nutrient score | Built |
 | 5 | AI nudges, PWA | Specced |
+
+Phases 0–4 are verified against a live project: 37 REST checks
+(`scripts/verify-phase4.ps1`), 38 more for Phase 1, and 42 browser checks driving
+two real clients (`scripts/e2e-handoff.mjs`).
 
 ## Quick start
 
@@ -32,7 +36,6 @@ npm install
 npm run dev
 ```
 
-Run `supabase/migrations/0001_phase1_rooms_and_fish.sql` in the Supabase SQL
-editor and enable anonymous sign-ins first, or every page will show a
-connection error. Full steps are in
-[`kibo-app/README.md`](kibo-app/README.md).
+Run every file in `supabase/migrations/` in order in the Supabase SQL editor and
+enable anonymous sign-ins first, or every page will show a connection error.
+Full steps are in [`kibo-app/README.md`](kibo-app/README.md).

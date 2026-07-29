@@ -4,8 +4,8 @@ Shared aquarium for two. See [`../Agent.md`](../Agent.md) for the design, the
 locked decisions, and the per-phase verification checklists.
 
 **Implemented:** Phase 0 (setup), Phase 1 (schema, RLS, room join), Phase 2
-(canvas + fish handoff), Phase 3 (warmth, mood, memos). Phases 4–5 are specced
-in `Agent.md` but not built.
+(canvas + fish handoff), Phase 3 (warmth, mood, memos), Phase 4 (phone-off
+continuity). Phase 5 is specced in `Agent.md` but not built.
 
 ## Setup
 
@@ -16,10 +16,15 @@ in `Agent.md` but not built.
    every page shows a sign-in error.
 3. **Database → Extensions → enable `pg_cron`** (optional; without it the
    nightly cleanup job is skipped with a notice instead of failing).
-4. **SQL Editor →** paste and run
-   [`supabase/migrations/0001_phase1_rooms_and_fish.sql`](supabase/migrations/0001_phase1_rooms_and_fish.sql).
+4. **SQL Editor →** paste and run every file in
+   [`supabase/migrations/`](supabase/migrations/) **in order**, `0001` through
+   `0005`.
 
-The migration is idempotent — re-running it is safe.
+Each migration is idempotent — re-running one is safe. Run the *whole* file:
+the SQL Editor executes only the highlighted text when there's a selection, so
+click into the editor and Ctrl+A before pasting. `kibo_schema_version()` is
+declared last in each file, so it can never report a migration that only partly
+applied — the verification scripts check it before anything else.
 
 ### 2. Environment
 
@@ -61,6 +66,43 @@ Each run leaves ~5 anonymous users and 2 rooms behind. Clear them under Authenti
 
 > Keep this script ASCII-only. PowerShell 5.1 reads a UTF-8-no-BOM `.ps1` as cp1252, where an em dash's trailing byte `0x94` becomes a smart closing quote and silently terminates a string literal.
 
+## Verifying Phase 4
+
+```powershell
+.\scripts\verify-phase4.ps1
+```
+
+Phase 4 is almost entirely server-side semantics, so it is verified over REST
+rather than in a browser: one participant away is not enough to open the shared
+interval, nothing is banked until someone comes back, a repeated `hidden_since`
+write is a no-op, a switching burst cannot bank more than it lasted, a solo tank
+never accrues, and neither the ledger nor the other person's away state is
+client-writable.
+
+37 checks, all green. The 8-hour cap check needs `SUPABASE_SERVICE_ROLE_KEY` in
+`.env.local` to backdate `co_away_since` — no client may write that column, which
+is the whole point of it. Without the key that one section skips and says so.
+
+Two things about that key, both of which cost a debugging round:
+
+- **Send it as `apikey` only, never as a bearer.** A new-format secret
+  (`sb_secret_…`) is not a JWT, so `Authorization: Bearer sb_secret_…` earns
+  PGRST301 "Expected 3 parts in JWT". The gateway resolves the role from `apikey`
+  for both the new and legacy formats.
+- **Identify as a CLI.** Supabase refuses a secret key on any request that looks
+  browser-borne, and `Invoke-WebRequest`'s default User-Agent contains "Mozilla" —
+  so a perfectly valid key fails with 401 "Forbidden use of secret API key in
+  browser". The script sets `User-Agent: kibo-verify/1.0`.
+
+Both `verify-*.ps1` scripts parse `.env.local` the way dotenv does — leading
+whitespace, an `export` prefix, quoted values — because a key indented by one
+space is still a key, and an anchored `^NAME=` reports it as absent while it sits
+there in the file.
+
+Not covered: two participants hiding in the same instant. Every request the
+script makes is sequential, so it cannot reproduce the race that
+`sync_co_away()` takes the room lock before counting to survive.
+
 ## Verifying the tank end to end
 
 ```bash
@@ -68,17 +110,48 @@ npm run dev          # in one terminal
 node scripts/e2e-handoff.mjs
 ```
 
-23 checks driving two real browser contexts (separate storage, so two genuine
+42 checks driving two real browser contexts (separate storage, so two genuine
 anonymous identities and two room slots). Covers the fish handoff in both
 directions, the "exactly 2 fish across both screens" invariant, orphan reclaim,
-solo reflection, reload recovery, and the Phase 3 layer: warmth and memos
-crossing to the other client, tapping a memo to send a heart back, and mood
-propagating *and* surviving a reload.
+solo reflection, reload recovery, the Phase 3 layer (warmth and memos crossing to
+the other client, tapping a memo to send a heart back, holding one to retract it,
+mood propagating *and* surviving a reload), and the Phase 4 client wiring — both
+clients looking away, then the credit arriving back on one screen through its own
+re-read and on the other through realtime.
+
+**It also reads the database back**, not just the DOM. It lifts the session token
+out of the page's cookies (`@supabase/ssr` stores it there, not in localStorage)
+and queries PostgREST read-only as that participant, so RLS still applies and a
+check can only assert on rows the client may genuinely see. That capability
+exists because DOM-only assertions are structurally blind to a write with no
+visible effect — which is how three dead writes survived two phases. The checks
+that need it: the heartbeat advancing `last_seen_at`, warmth bumping
+`last_interaction_at` through `touch_room()`, the nutrient credit landing
+server-side, the retracted memo really being gone, and the unload beacon.
+
+Two Playwright details worth knowing before editing it:
+
+- **`page.close()`, not `context.close()`, to test the unload beacon.** Closing
+  the context tears down its network stack with the page, so a `keepalive` fetch
+  has nowhere to complete and the beacon looks broken when it isn't. Closing the
+  page leaves the context alive to finish the request, and is the more faithful
+  model of someone closing one tab anyway.
+- **Headless Chromium keeps every page visible** and `document.hidden` is not
+  settable, so the Phase 4 section overrides the property and dispatches
+  `visibilitychange` by hand. That exercises everything from `useCoAway`'s
+  listener inward; when the browser decides a tab is hidden is not ours to test.
 
 The warmth glow, memo bubbles and hearts are drawn straight to canvas, so the
 canvas publishes `data-kibo-fx` ("corals:bubbles:hearts") and `data-kibo-bubble`
 (the topmost bubble's hit box) for the suite to read. Bubbles drift, so without
-the hit box a click is aiming at a moving target.
+the hit box a click is aiming at a moving target. The nutrient meter publishes
+`data-kibo-nutrients` for the same reason: the visible string is deliberately
+coarse ("4h 12m"), which is no way to assert on a count of seconds.
+
+Headless Chromium keeps every page visible and `document.hidden` is not
+settable, so the Phase 4 section overrides the property and dispatches
+`visibilitychange` by hand. That exercises everything from `useCoAway`'s listener
+inward; when the browser decides a tab is hidden is not ours to test.
 
 ## Verifying the handoff
 
@@ -102,14 +175,35 @@ components/
   AuthProvider.tsx         anonymous sign-in, once per tab
   RoomClient.tsx           join_room, heartbeat, overlay chrome
   Aquarium.tsx             canvas, presence, two-phase handoff, recovery
+  TankControls.tsx         warmth, mood, memo input
+  NutrientMeter.tsx        rest earned while nobody was watching
 lib/
   constants.ts             tuning knobs mirrored from the SQL
   types.ts                 row types + typed RPC errors
   useHeartbeat.ts          last_seen_at while visible
+  useCoAway.ts             hidden_since on visibilitychange, beacon on unload
+  nutrients.ts             the open interval, rendered but never written
   supabase/client.ts       browser client (cached per tab)
   supabase/admin.ts        service-role client, `server-only`
+  supabase/fire.ts         fire-and-forget writes that actually get sent
 supabase/migrations/       schema, grants, policies, RPCs, cleanup
 ```
+
+## The one trap worth knowing before you edit
+
+**Never `void` a supabase-js query or RPC builder.** They are lazy thenables —
+the request is issued when something awaits them, not when the chain is built:
+
+```ts
+void supabase.from('t').update({ x: 1 }).eq('id', id);   // sends NOTHING
+```
+
+No request, no error, no console output. This silently killed three writes across
+two phases (the heartbeat, `touch_room`, and the phone-off report) before Phase 4
+happened to build a UI that renders one of them. Use
+[`lib/supabase/fire.ts`](lib/supabase/fire.ts) for fire-and-forget writes, or
+`await`. `channel.send()`, `removeChannel()` and `supabase.auth.*` are real
+promises and are fine to `void`.
 
 ## Known limitations
 

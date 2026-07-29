@@ -798,7 +798,11 @@ These are the acceptance tests. All must pass before Phase 3.
 - **Transport:** insert into `memos`, then broadcast for immediate delivery. Same fast-path/truth-path split as fish — a memo that evaporates because the partner wasn't looking undercuts the premise.
 - **Rate limit:** add a `before insert` trigger rejecting more than ~10 memos per author per minute. The insert policy authorizes *who*, not *how often*.
 - **Canvas:** render text inside a floating bubble in the render loop. `ctx.fillText` is not an HTML injection surface, but still clip to the bubble and store each bubble's current bounds on the memo object so clicks can be hit-tested.
-- **Retract:** either participant can retract either person's memo, via the `retract_memo()` RPC (not a client UPDATE — see the policy note in Phase 1). For a two-person space this is the whole moderation story; cleanup drops tombstones after 7 days. **The gesture is not built yet** — the RPC and its authorisation are verified, but nothing in the UI calls it. It needs a design decision: which gesture retracts (tap already sends a heart), and whether the affordance appears for both people or only the author.
+- **Retract:** either participant can retract either person's memo, via the `retract_memo()` RPC (not a client UPDATE — see the policy note in Phase 1). For a two-person space this is the whole moderation story; cleanup drops tombstones after 7 days.
+
+  **Built: hold a bubble for `RETRACT_HOLD_MS` (700ms), offered to both people.** Tap was already taken by hearts, so the two gestures are separated by duration on one pointer: the tap fires on `pointerup` so that a press which becomes a hold does not also send a heart, and moving more than `PRESS_CANCEL_PX` mid-press fires neither. The bubble fades as the hold progresses, which makes the gesture its own confirmation — no dialog, and the removal at the end lands on an already-faint bubble rather than snapping something solid away. Showing it to both matches the policy rather than narrowing it: the DB has always allowed either participant to retract either memo, and hiding the affordance from the non-author would have been a UI-only restriction pretending to be a rule.
+
+  **Retraction travels by broadcast, and has no truth-path fallback.** Setting `deleted_at` makes the row stop satisfying the memos SELECT policy (`deleted_at is null`), so `postgres_changes` cannot deliver it — the subscription reads through that same policy. Unlike fish and memos, there is no second channel to fall back on. That is acceptable only because a missed retraction self-heals rather than desyncing: the bubble expires on its own within `MEMO_LIFETIME_MS`, and the backlog query on next load already filters retracted memos out. The row is gone either way.
 - **Reply:** clicking a bubble sends a heart back over broadcast.
 - **Backlog:** on subscribe, the five most recent memos are loaded as bubbles, so arriving later still shows you what was left.
 
@@ -822,6 +826,21 @@ Both surfaced while writing the browser test, and both are properties of the des
 ## Phase 4: Phone-Off Continuity
 
 **Goal:** when both people have put the app away, the tank quietly gains nutrients.
+
+**Built and verified.** Migration `0005`, `lib/useCoAway.ts`, `lib/nutrients.ts`, `components/NutrientMeter.tsx`, and the room-row plumbing in `RoomClient.tsx`. Verified by `scripts/verify-phase4.ps1` (37 checks over REST, cap included) and sections 5f–6 of `scripts/e2e-handoff.mjs` (42 in the suite overall).
+
+Building it also turned up a bug that had been silently live since Phase 1 — un-awaited supabase-js builders never issue their request, which had killed the heartbeat and `touch_room()` as well as this phase's own write. See the entry under Standing Constraints; it is the most transferable thing in this document.
+
+Three things came out differently from the draft below, and the reasons are worth keeping:
+
+1. **The trigger locks the room *before* counting, not after.** The draft counts participants first and then takes `for update` on the room. Both people can look away in the same instant, and each trigger runs inside its own client transaction — so counting first means neither sees the other's uncommitted `hidden_since` under READ COMMITTED, both conclude someone is still present, and the interval never opens at all. Taking the row lock first serialises the whole count-then-decide: the waiter re-reads the room after the lock is released, and its count then runs on a snapshot that includes the sibling's committed write.
+2. **The trigger returns early when `hidden_since` did not actually move.** `after update of hidden_since` fires on any UPDATE whose target list names the column, changed or not, and clients re-write the same state routinely — a repeated `visibilitychange`, a mount that sets null over null, the unload beacon landing behind its own ordinary write. None of those can change the outcome, so leaving early keeps both participants off the room's row lock for writes that were always no-ops.
+3. **`navigator.sendBeacon` cannot be used for the unload write**, even though it is the tool the draft reaches for first. It sends no custom headers, so it cannot present the `Authorization` bearer PostgREST needs, and RLS rejects it. `fetch` with `keepalive: true` survives unload *and* can carry the header, which is why `useCoAway` builds that one request by hand instead of going through supabase-js.
+
+Two smaller notes:
+
+- **`useCoAway` is deliberately separate from `useHeartbeat`**, despite both listening to `visibilitychange` with the same dependencies. The heartbeat's rule is "never beat while hidden"; this one's is "always say which way it went". Sharing one UPDATE would also make every heartbeat fire the co-away trigger.
+- **The client re-reads the room on returning to the tab**, not only on mount. The interesting change happens precisely while nobody is watching, and a backgrounded mobile tab has lost its websocket — realtime has a gap exactly where the credit landed. That re-read races `useCoAway`'s own write harmlessly: whichever side of the credit it reads, `liveNutrientSeconds` renders the same total, which is the real reason the open interval is rendered rather than ignored.
 
 ### The mechanic
 
@@ -911,6 +930,8 @@ Phone-off keys on **page visibility only**. `display-mode: standalone` tells you
 
 ### Phase 4 verification
 
+`scripts/verify-phase4.ps1` covers all of these over REST; section 5f of `scripts/e2e-handoff.mjs` covers the two that are only visible in a browser.
+
 - Both tabs visible → nutrients static.
 - One tab hidden → still static.
 - Both hidden → the live counter advances; on return, `nutrient_seconds` matches elapsed wall-clock time within a second or two.
@@ -918,6 +939,13 @@ Phone-off keys on **page visibility only**. `display-mode: standalone` tells you
 - Both hidden for longer than the cap → exactly `MAX_AWAY_CREDIT_SECONDS` is credited, not the full elapsed time.
 - A solo participant hiding and returning credits nothing.
 - A direct client `update rooms set nutrient_seconds = 999999` fails on column privileges.
+
+Two more the checklist did not originally call for, both worth keeping:
+
+- **Neither participant can rewrite the other's `hidden_since`.** Marking your partner away would open the interval while you are still looking, which is the one forgery this mechanic actually invites. The `self update participant` policy stops it, so the attempt returns 200 with an empty result set rather than an error — assert on the unchanged value, not on a status code.
+- **A no-op write leaves the ledger alone**, including one that bundles `hidden_since` with the heartbeat column.
+
+The cap check has to backdate `co_away_since`, and no client may write that column — so that one section needs `SUPABASE_SERVICE_ROLE_KEY` and skips itself, loudly, without it. The simultaneous-hide race behind the lock ordering is *not* covered: every request the script makes is sequential.
 
 ---
 
@@ -932,7 +960,7 @@ npm install @google/genai
 - **Model:** `gemini-3.5-flash-lite` is the cost-appropriate default for a one-sentence notification. `gemini-3.6-flash` is the upgrade if nudge quality turns out to matter more than cost. `gemini-flash-latest` exists as a floating alias — **do not use it here**, because a silent model change under a scheduled job is a debugging trap.
 - **Verify the call shape before writing it.** Package (`@google/genai`) and model IDs above are current as of 2026-07, but the client surface has moved recently — the quickstart shows `ai.interactions.create({ model, input })`, whereas older tutorials use `models.generateContent`. Check [ai.google.dev/gemini-api/docs/quickstart](https://ai.google.dev/gemini-api/docs/quickstart) at implementation time rather than copying either from memory.
 - **Route:** `app/api/nudge/route.ts`, server-side only, using `lib/supabase/admin.ts`.
-- **Scheduling:** an API route does not fire on its own. Use **Vercel Cron** (`vercel.json`, once or twice daily) or `pg_cron` + `pg_net`. The draft's "run a cron job or scheduled function" left this ambiguous; pick one and write it down.
+- **Scheduling: Vercel Cron. Decided.** An API route does not fire on its own, and the two candidates were `vercel.json` cron or `pg_cron` + `pg_net`. Vercel Cron wins because it keeps `GEMINI_API_KEY` in exactly one place — the server env — whereas driving it from Postgres means the database also needs to hold or reach the key. It also lines up with the auth check below: Vercel sends `Authorization: Bearer $CRON_SECRET` automatically when that variable is set. **Verify both the header behaviour and the Hobby-plan limits on frequency and job count against current Vercel docs at implementation time** — same rule as the Gemini SDK above, for the same reason.
 - **Auth:** verify `Authorization: Bearer ${CRON_SECRET}` and return 401 otherwise. An unauthenticated route that calls a paid API is a billing vulnerability.
 - **Trigger:** rooms where `last_interaction_at < now() - interval '3 days'` **and** (`last_nudged_at` is null or older than the same window).
 - **Idempotency:** set `last_nudged_at = now()` in the same transaction that sends. Cron delivery is at-least-once, so without this a retry double-nudges.
@@ -966,6 +994,11 @@ npm install @google/genai
 - Broadcast is never the only record of a state change that should survive a refresh.
 - Anything drawn on the canvas is driven by one `requestAnimationFrame` loop and delta time. No `setInterval` animations, no per-frame React state.
 - Keep the ambient feel in code review too: transitions fade, they don't snap.
+- **Never `void` a supabase-js query or RPC builder.** They are *lazy thenables*: the request is issued when something awaits them, not when the chain is built, so `void supabase.from(...).update(...)` sends nothing whatsoever — no request, no error, no console output, and a call site that reads exactly like a write. Fire-and-forget writes go through `fire()` in `lib/supabase/fire.ts`, which awaits and logs. `channel.send()`, `removeChannel()` and everything under `supabase.auth` are real promises, so `void` on those is fine.
+
+  This is not hypothetical: it silently killed three writes across two phases — the presence heartbeat (`useHeartbeat`, since Phase 1), `touch_room()` on warmth (`TankControls`, since Phase 3), and the phone-off report (`useCoAway`, Phase 4). All three are writes whose effect is invisible from the screen that makes them, which is exactly why the first two survived a phase sign-off each. **The lesson generalises past this API: a fire-and-forget write with no observable local effect needs a test that reads it back, or it is indistinguishable from a no-op.** Phase 4 only caught it because the meter renders what the write causes.
+
+- **Every assertion must be able to fail.** Prefer waiting for a *change from a captured baseline* over an absolute threshold: a threshold is often already satisfied by whatever happened to be on screen. Two real ones from Phase 4, both green while the thing under test was broken or wrong. `waitFor(bubbles >= 1)` was satisfied by a memo still drifting from an earlier section, so the retract test held down on the wrong memo and then read the unchanged count as "nothing happened". `settled === banked` was satisfied by `0 === 0` when the meter never rendered at all. When a check passes, ask what it would take for it to fail.
 
 ## Deferred Increments
 

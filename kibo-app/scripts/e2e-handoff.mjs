@@ -1,4 +1,4 @@
-// Phase 2 verification: two independent clients, one shared tank.
+// Phases 2-4 in a browser: two independent clients, one shared tank.
 //
 //   1. npm run dev
 //   2. node scripts/e2e-handoff.mjs
@@ -11,9 +11,44 @@
 // The assertions read the canvas aria-label ("N fish on this screen"), which
 // tracks the same state the render loop uses. No pixel reading.
 
+import { readFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 
 const BASE = process.env.KIBO_BASE_URL ?? 'http://localhost:3000';
+
+/**
+ * Reads .env.local so the suite can query the database back, not just the DOM.
+ *
+ * DOM-only assertions are why a whole class of bug survived two phases: a write
+ * with no visible effect is invisible to them. `void supabase.from(..).update(..)`
+ * never sent its request, and nothing in this file could tell.
+ *
+ * Tolerates what dotenv tolerates — leading whitespace, an `export` prefix,
+ * quotes — because a key indented by one space is still a key, and reporting it
+ * as absent sends you looking in the wrong place.
+ */
+function readEnvLocal() {
+  const out = {};
+  try {
+    const text = readFileSync(new URL('../.env.local', import.meta.url), 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^\s*(?:export\s+)?([\w.-]+)\s*=\s*(.*)$/);
+      if (!m) continue;
+      let v = m[2].trim();
+      const quoted =
+        v.length >= 2 &&
+        ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")));
+      out[m[1]] = quoted ? v.slice(1, -1) : v;
+    }
+  } catch {
+    // Absent .env.local just means the read-back checks report themselves unmet.
+  }
+  return out;
+}
+
+const ENV = readEnvLocal();
+const SUPABASE_URL = (ENV.NEXT_PUBLIC_SUPABASE_URL ?? '').replace(/\/+$/, '');
+const SUPABASE_KEY = ENV.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
 // A narrow viewport keeps crossings quick: fish move at 52 and 38 CSS px/s, so
 // a 420px-wide tank is crossed in roughly 8-11s rather than 25-35s at 1280px.
 const VIEWPORT = { width: 420, height: 640 };
@@ -52,6 +87,129 @@ async function fx(page) {
   return { corals, bubbles, hearts };
 }
 
+/**
+ * Banked-plus-open nutrient seconds from the meter's data attribute. The meter
+ * renders nothing at zero, which is the same reading as "nothing banked yet".
+ */
+async function nutrients(page) {
+  const meter = page.locator('[data-kibo-nutrients]');
+  if ((await meter.count()) === 0) return 0;
+  return Number(await meter.first().getAttribute('data-kibo-nutrients'));
+}
+
+/**
+ * Fakes looking away, and tells the page about it.
+ *
+ * document.hidden is not settable and headless Chromium keeps every page
+ * visible, so the property is overridden and the event dispatched by hand. That
+ * covers everything from useCoAway's listener inward - the browser's own
+ * decision about when a tab counts as hidden is not ours to test.
+ */
+function setHidden(page, hidden) {
+  return page.evaluate((isHidden) => {
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => isHidden,
+    });
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (isHidden ? 'hidden' : 'visible'),
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, hidden);
+}
+
+/**
+ * The page's Supabase access token, lifted out of its cookies.
+ *
+ * Cookies, not localStorage: the app uses @supabase/ssr's createBrowserClient,
+ * which persists the session as `sb-<ref>-auth-token`, base64-prefixed and split
+ * across `.0`/`.1` chunks once it outgrows one cookie.
+ */
+function sessionToken(page) {
+  return page.evaluate(() => {
+    const jar = {};
+    for (const part of document.cookie.split('; ')) {
+      const i = part.indexOf('=');
+      if (i > 0) jar[part.slice(0, i)] = part.slice(i + 1);
+    }
+    const chunkIndex = (name) => {
+      const m = name.match(/\.(\d+)$/);
+      return m ? Number(m[1]) : -1;
+    };
+    const names = Object.keys(jar)
+      .filter((k) => /^sb-.+-auth-token(\.\d+)?$/.test(k))
+      .sort((a, b) => chunkIndex(a) - chunkIndex(b));
+    if (names.length === 0) return null;
+
+    let raw = decodeURIComponent(names.map((n) => jar[n]).join(''));
+    if (raw.startsWith('base64-')) {
+      try {
+        raw = atob(raw.slice(7));
+      } catch {
+        return null;
+      }
+    }
+    try {
+      return JSON.parse(raw).access_token ?? null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+/** auth.uid() for a token, read from the JWT's own claims. */
+function userIdFromToken(token) {
+  try {
+    const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+    return claims.sub ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read-only PostgREST query as a given participant. Deliberately read-only: the
+ * harness observes what the app did, it never stands in for the app. RLS still
+ * applies, so a check can only assert on rows that participant may genuinely
+ * see.
+ */
+async function dbRead(path, token) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !token) return { error: 'no db access' };
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}` },
+    });
+    const text = await r.text();
+    if (!r.ok) return { error: `${r.status} ${text}` };
+    return { rows: JSON.parse(text) };
+  } catch (cause) {
+    return { error: String(cause) };
+  }
+}
+
+/** The single room this participant can see. RLS makes the lookup unambiguous. */
+async function roomRow(token, select) {
+  const { rows } = await dbRead(`rooms?select=${select}`, token);
+  return Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+}
+
+async function participantRow(token, userId, select) {
+  const { rows } = await dbRead(
+    `room_participants?select=${select}&user_id=eq.${userId}`,
+    token
+  );
+  return Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+}
+
+/** Press and hold, for the retract gesture. Tap is a click; this is not. */
+async function longPress(page, x, y, ms) {
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await new Promise((r) => setTimeout(r, ms));
+  await page.mouse.up();
+}
+
 /** Poll until predicate(value) or timeout. Returns the last value seen. */
 async function waitFor(fn, predicate, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
@@ -67,6 +225,12 @@ async function waitFor(fn, predicate, timeoutMs, label) {
 
 const browser = await chromium.launch();
 const errors = [];
+
+// Set once A exists; the read-back checks degrade to explicit failures without
+// them rather than silently passing.
+let tokenA = null;
+let uidA = null;
+let canRead = false;
 
 async function newClient(name) {
   const context = await browser.newContext({ viewport: VIEWPORT });
@@ -141,6 +305,47 @@ try {
   );
   check('B sees the partner as present', bTogether === 1);
 
+  console.log('\n=== 3b. The suite can read the database back');
+  tokenA = await sessionToken(A.page);
+  uidA = tokenA ? userIdFromToken(tokenA) : null;
+  check(
+    "A's session token was recovered from its cookies",
+    typeof tokenA === 'string' && tokenA.length > 40,
+    tokenA ? `${tokenA.length} chars` : 'null'
+  );
+  check('the token resolves to an auth.uid()', typeof uidA === 'string', String(uidA));
+  const probe = await roomRow(tokenA, 'id,last_interaction_at');
+  check(
+    'a read-back query returns exactly the one room A belongs to',
+    probe !== null,
+    JSON.stringify(probe)
+  );
+  canRead = probe !== null && typeof uidA === 'string';
+  if (!canRead) {
+    console.log('         (read-back checks below will report themselves unmet)');
+  }
+
+  console.log('\n=== 3c. The heartbeat actually writes (it did not, until it was fixed)');
+  if (!canRead) {
+    check('heartbeat advances last_seen_at', false, 'no db access');
+  } else {
+    const before = (await participantRow(tokenA, uidA, 'user_id,last_seen_at'))
+      ?.last_seen_at;
+    // beat() is bound to visibilitychange, so dispatching one is the cheap way
+    // to trigger it — waiting out HEARTBEAT_MS would cost a minute, and the
+    // mount beat is indistinguishable from join_room's own last_seen_at write.
+    await A.page.evaluate(() =>
+      document.dispatchEvent(new Event('visibilitychange'))
+    );
+    const after = await waitFor(
+      async () => (await participantRow(tokenA, uidA, 'user_id,last_seen_at'))?.last_seen_at,
+      (v) => v !== before,
+      15_000,
+      'last_seen_at to advance'
+    );
+    check('heartbeat advances last_seen_at', after !== before, `${before} -> ${after}`);
+  }
+
   console.log('\n=== 4. Fish crosses from A to B');
   // Only the HOLDER simulates a fish, and requestAnimationFrame is paused in a
   // backgrounded tab -- so the holder must be foregrounded or nothing moves and
@@ -188,6 +393,12 @@ try {
   );
 
   console.log('\n=== 5b. Warmth reaches the other screen');
+  // Captured before the click: warmth also calls touch_room(), and Phase 5's
+  // nudge scheduler triggers on last_interaction_at. That RPC was silently dead
+  // for a whole phase, so it gets read back rather than assumed.
+  const idleBefore = canRead
+    ? (await roomRow(tokenA, 'id,last_interaction_at'))?.last_interaction_at
+    : null;
   await A.page.getByRole('button', { name: /send warmth/i }).click();
   const bCoral = await waitFor(
     async () => (await fx(B.page)).corals,
@@ -198,6 +409,22 @@ try {
   check('warmth sent by A renders on B', bCoral >= 1, `corals=${bCoral}`);
   const aCoral = (await fx(A.page)).corals;
   check('the sender sees their own warmth too', aCoral >= 1, `corals=${aCoral}`);
+
+  if (!canRead) {
+    check('warmth bumps last_interaction_at via touch_room()', false, 'no db access');
+  } else {
+    const idleAfter = await waitFor(
+      async () => (await roomRow(tokenA, 'id,last_interaction_at'))?.last_interaction_at,
+      (v) => v !== idleBefore,
+      15_000,
+      'last_interaction_at to advance'
+    );
+    check(
+      'warmth bumps last_interaction_at via touch_room()',
+      idleAfter !== idleBefore,
+      `${idleBefore} -> ${idleAfter}`
+    );
+  }
 
   console.log('\n=== 5c. Memo persists and reaches the other screen');
   const memoText = `hello from A ${Date.now() % 100000}`;
@@ -278,8 +505,218 @@ try {
     `bubbles=${memoAfterReload}`
   );
 
+  console.log('\n=== 5f. Phone-off continuity (Phase 4)');
+  // Server-side semantics - the cap, the solo case, the ledger's privileges -
+  // are verified in scripts/verify-phase4.ps1. What is only observable here is
+  // the client wiring: visibilitychange reaching hidden_since, and the credit
+  // coming back through realtime into the meter.
+  check('nothing is banked while both are looking', (await nutrients(A.page)) === 0);
+
+  const idleBeforeAway = canRead
+    ? (await roomRow(tokenA, 'id,last_interaction_at'))?.last_interaction_at
+    : null;
+
+  await setHidden(A.page, true);
+  await setHidden(B.page, true);
+
+  // The open interval is rendered, never written, so the counter has to advance
+  // on its own once realtime says co_away_since opened.
+  const ticking = await waitFor(
+    () => nutrients(A.page),
+    (v) => v >= 1,
+    20_000,
+    'the live counter to start advancing'
+  );
+  check('the counter advances while both are away', ticking >= 1, `${ticking}s`);
+
+  const AWAY_MS = 5_000;
+  await new Promise((r) => setTimeout(r, AWAY_MS));
+  await setHidden(A.page, false);
+
+  const banked = await waitFor(
+    () => nutrients(A.page),
+    (v) => v >= 3,
+    20_000,
+    'the away interval to be credited'
+  );
+  check(
+    'both away then back credits roughly the time away',
+    banked >= 3 && banked <= AWAY_MS / 1000 + 4,
+    `${banked}s for a ~${AWAY_MS / 1000}s absence`
+  );
+
+  // A figure that has stopped moving is the observable difference between
+  // "banked and the interval closed" and "still open and being rendered". If the
+  // credit had never landed the meter would read 0 instead, since banked seconds
+  // are all that is left once co_away_since clears.
+  // Tolerates one second of drift, because the rendered open portion floors a
+  // client clock while the credit is an integer from the server's - but an
+  // interval still open would have grown by two or three by now.
+  await new Promise((r) => setTimeout(r, 2_500));
+  const settled = await nutrients(A.page);
+  check(
+    'the credit is banked and the interval closed (the figure stops moving)',
+    // The >= 3 matters: without it a meter stuck at zero satisfies "unchanged"
+    // and this check passes while nothing works at all. It did, once.
+    settled >= 3 && settled >= banked && settled - banked <= 1,
+    `${banked}s then ${settled}s`
+  );
+
+  // Assert B's meter BEFORE letting B come back: still away, so the only way it
+  // can know the figure is the realtime rooms UPDATE. Unhiding first would let
+  // the return-to-tab refetch answer instead, and the realtime path would go
+  // untested.
+  const bBanked = await waitFor(
+    () => nutrients(B.page),
+    (v) => v >= 3,
+    20_000,
+    'the credit to reach the other screen over realtime'
+  );
+  check('the credit reaches the other screen over realtime', bBanked >= 3, `${bBanked}s`);
+  await setHidden(B.page, false);
+
+  // The trigger bumps last_interaction_at when it banks — a different writer
+  // from touch_room(), so it gets its own check.
+  if (!canRead) {
+    check('banking the credit also bumps last_interaction_at', false, 'no db access');
+  } else {
+    const row = await roomRow(tokenA, 'id,last_interaction_at,nutrient_seconds,co_away_since');
+    check(
+      'banking the credit also bumps last_interaction_at',
+      row?.last_interaction_at !== idleBeforeAway,
+      `${idleBeforeAway} -> ${row?.last_interaction_at}`
+    );
+    check(
+      'the ledger really is banked server-side, not just rendered',
+      (row?.nutrient_seconds ?? 0) >= 3 && row?.co_away_since === null,
+      JSON.stringify(row)
+    );
+  }
+
+  console.log('\n=== 5g. Hold a memo to retract it, tap still sends a heart');
+  // Baselines BEFORE sending, and the wait is for an INCREASE.
+  //
+  // Waiting for `bubbles >= 1` instead was satisfied instantly by the memo still
+  // drifting from 5c, so the press landed on that one and retracted the wrong
+  // memo — while the counts stayed at 1 and read as "nothing happened". The app
+  // was right; the assertion was aiming at whatever happened to be on screen.
+  const baseB = (await fx(B.page)).bubbles;
+  const baseA = (await fx(A.page)).bubbles;
+
+  const retractText = `retract me ${Date.now() % 100000}`;
+  await A.page.getByLabel(/leave a small memo/i).fill(retractText);
+  await A.page.getByLabel(/leave a small memo/i).press('Enter');
+
+  const bubblesBeforeB = await waitFor(
+    async () => (await fx(B.page)).bubbles,
+    (v) => v > baseB,
+    15_000,
+    "the new memo to reach B so B can retract A's memo"
+  );
+  check(
+    "A's new memo reached B (so the press aims at the newest bubble)",
+    bubblesBeforeB > baseB,
+    `${baseB} -> ${bubblesBeforeB}`
+  );
+  const bubblesBeforeA = await waitFor(
+    async () => (await fx(A.page)).bubbles,
+    (v) => v > baseA,
+    15_000,
+    "the new memo to render on its author's screen"
+  );
+
+  // B retracts A's memo: the policy allows either participant to retract either
+  // person's memo, and the gesture is offered to both.
+  const bBox = await B.page.locator('canvas').first().getAttribute('data-kibo-bubble');
+  const bCanvasBox = await B.page.locator('canvas').first().boundingBox();
+  check('B has a bubble hit box to aim at', Boolean(bBox), String(bBox));
+
+  if (bBox) {
+    const [bx, by, bw, bh] = bBox.split(',').map(Number);
+    // 900ms: comfortably past RETRACT_HOLD_MS (700) without being so long that a
+    // passing test tells us nothing about the threshold.
+    await longPress(
+      B.page,
+      bCanvasBox.x + bx + bw / 2,
+      bCanvasBox.y + by + bh / 2,
+      900
+    );
+
+    const bubblesAfterB = await waitFor(
+      async () => (await fx(B.page)).bubbles,
+      (v) => v < bubblesBeforeB,
+      15_000,
+      'the retracted bubble to leave B'
+    );
+    check(
+      'holding a memo retracts it on the retracting screen',
+      bubblesAfterB < bubblesBeforeB,
+      `${bubblesBeforeB} -> ${bubblesAfterB}`
+    );
+
+    const bubblesAfterA = await waitFor(
+      async () => (await fx(A.page)).bubbles,
+      (v) => v < bubblesBeforeA,
+      15_000,
+      'the retraction to reach the author'
+    );
+    check(
+      'the retraction reaches the other screen',
+      bubblesAfterA < bubblesBeforeA,
+      `${bubblesBeforeA} -> ${bubblesAfterA}`
+    );
+
+    if (!canRead) {
+      check('the memo is soft-deleted, not just hidden locally', false, 'no db access');
+    } else {
+      // The read policy hides retracted memos, so a member's own SELECT is the
+      // honest test: exactly one of this run's two memos should remain.
+      const { rows } = await dbRead('memos?select=id,body', tokenA);
+      const bodies = Array.isArray(rows) ? rows.map((m) => m.body) : [];
+      check(
+        'the retracted memo is gone from the room for good',
+        !bodies.includes(retractText) && bodies.length >= 1,
+        JSON.stringify(bodies)
+      );
+    }
+
+    // A reload is the real proof it was persisted rather than removed on screen.
+    // Assert the exact backlog size, not ">= 1": a surviving memo satisfies
+    // ">= 1" even if the retracted one comes back alongside it, which is the one
+    // failure this check exists to catch.
+    const { rows: liveMemos } = canRead
+      ? await dbRead('memos?select=id', tokenA)
+      : { rows: null };
+    const expected = Array.isArray(liveMemos) ? Math.min(liveMemos.length, 5) : null;
+
+    await B.page.reload({ waitUntil: 'domcontentloaded' });
+    await B.page.locator('canvas').first().waitFor({ timeout: 30_000 });
+    const afterReload = await waitFor(
+      async () => (await fx(B.page)).bubbles,
+      (v) => (expected === null ? v >= 1 : v === expected),
+      25_000,
+      'the backlog to reload without the retracted memo'
+    );
+    check(
+      'the retracted memo does not come back on reload, the surviving one does',
+      expected === null ? afterReload >= 1 : afterReload === expected,
+      `bubbles=${afterReload}, live memos=${expected}`
+    );
+  }
+
   console.log('\n=== 6. B leaves: no fish is stranded');
-  await B.context.close();
+  // B is visible here, so this is a departure with no preceding hidden report —
+  // exactly the case the pagehide beacon exists for.
+  const uidB = tokenA
+    ? await sessionToken(B.page).then((t) => (t ? userIdFromToken(t) : null))
+    : null;
+
+  // page.close(), NOT context.close(). Closing the context tears down the
+  // browsing context's network stack along with the page, so a keepalive fetch
+  // has nowhere to complete and the beacon is lost — which looks exactly like a
+  // broken beacon. Closing the page leaves the context alive to finish the
+  // request, and is also the more faithful model of a person closing one tab.
+  await B.page.close();
   // Presence empties, then the remaining client claims anything held by the
   // departed partner (3s debounce in Aquarium.tsx).
   const reclaimed = await waitFor(
@@ -296,6 +733,25 @@ try {
     'A to show alone again'
   );
   check('A shows "on your own" after B leaves', aloneAgain === 1);
+
+  // The unload beacon: B was visible when its page closed, so the ONLY way
+  // hidden_since can be set is the pagehide keepalive fetch. A plain
+  // supabase-js call is cancelled by the browser during unload.
+  if (!canRead || !uidB) {
+    check("the unload beacon recorded B's departure", false, 'no db access');
+  } else {
+    const bRow = await waitFor(
+      () => participantRow(tokenA, uidB, 'user_id,hidden_since'),
+      (r) => Boolean(r?.hidden_since),
+      15_000,
+      "B's hidden_since to be set by the beacon"
+    );
+    check(
+      "the unload beacon recorded B's departure",
+      Boolean(bRow?.hidden_since),
+      JSON.stringify(bRow)
+    );
+  }
 
   console.log('\n=== 7. Solo: fish reflect instead of vanishing');
   await A.page.bringToFront();
@@ -332,5 +788,9 @@ if (errors.length) {
 
 console.log('\n======================================');
 console.log(`PASS: ${pass}   FAIL: ${fail}`);
-console.log(fail > 0 ? 'RESULT: problems found' : 'RESULT: Phase 2 handoff verified');
+console.log(
+  fail > 0
+    ? 'RESULT: problems found'
+    : 'RESULT: handoff, ambient interactions and phone-off continuity verified'
+);
 process.exit(fail > 0 ? 1 : 0);
