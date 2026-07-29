@@ -1,9 +1,30 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
-import { FISH_MARGIN, TANK_MOOD_GRADIENT, type TankMood } from '@/lib/constants';
-import type { FishCrossPayload, FishDirection, FishRow } from '@/lib/types';
+import {
+  FISH_MARGIN,
+  HEART_LIFETIME_MS,
+  MAX_BUBBLES,
+  MAX_CORALS,
+  MAX_HEARTS,
+  MEMO_BACKLOG,
+  MEMO_LIFETIME_MS,
+  MOOD_FADE_MS,
+  TANK_MOOD_GRADIENT,
+  WARMTH_LIFETIME_MS,
+  type TankMood,
+} from '@/lib/constants';
+import type {
+  FishCrossPayload,
+  FishDirection,
+  FishRow,
+  HeartPayload,
+  MemoPayload,
+  MemoRow,
+  RoomRow,
+  WarmthPayload,
+} from '@/lib/types';
 
 /**
  * A fish as this screen sees it. `x` is local CSS pixels and is never
@@ -22,14 +43,106 @@ type LocalFish = {
   handingOff: boolean;
 };
 
+/** Warmth: a glow near the tank floor that swells and fades. Ephemeral. */
+type Coral = { id: string; xFrac: number; bornAt: number };
+
+/** A memo drifting upward. Persisted in `memos`; this is just its rendering. */
+type Bubble = {
+  id: string;
+  body: string;
+  xFrac: number;
+  yFrac: number;
+  bornAt: number;
+  swayPhase: number;
+  /** Last drawn bounds in CSS px, for click hit-testing. */
+  hit: { x: number; y: number; w: number; h: number } | null;
+};
+
+/** A heart sent back in reply to a memo. Ephemeral. */
+type Heart = { id: string; xFrac: number; yFrac: number; bornAt: number };
+
 /** How long presence must report an empty room before we claim its fish. */
 const ALONE_CLAIM_DELAY_MS = 3_000;
 
-/** Stable per-fish bob offset, so two fish never swim in lockstep. */
-function bobPhaseFor(id: string): number {
-  let hash = 0;
-  for (let i = 0; i < id.length; i += 1) hash = (hash * 31 + id.charCodeAt(i)) % 6283;
-  return hash / 1000;
+type RGB = [number, number, number];
+
+function hexToRgb(hex: string): RGB {
+  const v = hex.replace('#', '');
+  return [
+    parseInt(v.slice(0, 2), 16),
+    parseInt(v.slice(2, 4), 16),
+    parseInt(v.slice(4, 6), 16),
+  ];
+}
+
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const lerpRgb = (a: RGB, b: RGB, t: number): RGB => [
+  lerp(a[0], b[0], t),
+  lerp(a[1], b[1], t),
+  lerp(a[2], b[2], t),
+];
+const rgbCss = ([r, g, b]: RGB) =>
+  `rgb(${Math.round(r)} ${Math.round(g)} ${Math.round(b)})`;
+
+const moodStops = (mood: TankMood): [RGB, RGB] => {
+  const [top, bottom] = TANK_MOOD_GRADIENT[mood];
+  return [hexToRgb(top), hexToRgb(bottom)];
+};
+
+/** Stable pseudo-random in [0,1) from an id, so placement survives a reload. */
+function hashUnit(id: string, salt = 0): number {
+  let h = 2166136261 ^ salt;
+  for (let i = 0; i < id.length; i += 1) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 10000) / 10000;
+}
+
+const bobPhaseFor = (id: string) => hashUnit(id, 7) * 6.283;
+
+/** Eased 0->1->0 envelope: fade in, hold, fade out. */
+function envelope(age: number, life: number, fadeIn = 0.15, fadeOut = 0.3) {
+  const t = age / life;
+  if (t <= 0) return 0;
+  if (t >= 1) return 0;
+  if (t < fadeIn) return t / fadeIn;
+  if (t > 1 - fadeOut) return (1 - t) / fadeOut;
+  return 1;
+}
+
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number) {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (ctx.measureText(next).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 5);
+}
+
+function roundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
 function drawFish(
@@ -40,13 +153,11 @@ function drawFish(
 ) {
   const bob = Math.sin(seconds * 1.1 + fish.bobPhase) * 5;
   const y = fish.yFrac * height + bob;
-  const facing = fish.direction;
 
   ctx.save();
   ctx.translate(fish.x, y);
-  ctx.scale(facing, 1);
+  ctx.scale(fish.direction, 1);
 
-  // Tail — sweeps opposite the bob, so the fish reads as swimming.
   const sweep = Math.sin(seconds * 5 + fish.bobPhase) * 4;
   ctx.beginPath();
   ctx.moveTo(-16, 0);
@@ -57,19 +168,128 @@ function drawFish(
   ctx.globalAlpha = 0.75;
   ctx.fill();
 
-  // Body
   ctx.globalAlpha = 1;
   ctx.beginPath();
   ctx.ellipse(0, 0, 20, 10, 0, 0, Math.PI * 2);
   ctx.fillStyle = fish.color;
   ctx.fill();
 
-  // Eye
   ctx.beginPath();
   ctx.arc(10, -2.5, 1.9, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(8, 26, 38, 0.85)';
   ctx.fill();
 
+  ctx.restore();
+}
+
+function drawCoral(
+  ctx: CanvasRenderingContext2D,
+  coral: Coral,
+  width: number,
+  height: number,
+  now: number,
+  seconds: number
+) {
+  const alpha = envelope(now - coral.bornAt, WARMTH_LIFETIME_MS, 0.2, 0.45);
+  if (alpha <= 0) return;
+  const x = coral.xFrac * width;
+  const base = height - 6;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  const glow = ctx.createRadialGradient(x, base, 2, x, base, 90);
+  glow.addColorStop(0, 'rgba(255, 196, 140, 0.55)');
+  glow.addColorStop(1, 'rgba(255, 196, 140, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(x - 90, base - 90, 180, 96);
+
+  // A few fronds, swaying gently.
+  ctx.strokeStyle = 'rgba(255, 210, 165, 0.85)';
+  ctx.lineCap = 'round';
+  for (let i = -1; i <= 1; i += 1) {
+    const sway = Math.sin(seconds * 1.4 + i) * 6;
+    ctx.lineWidth = 3.5 - Math.abs(i);
+    ctx.beginPath();
+    ctx.moveTo(x + i * 11, base);
+    ctx.quadraticCurveTo(x + i * 14 + sway, base - 26, x + i * 9 + sway, base - 46);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawBubble(
+  ctx: CanvasRenderingContext2D,
+  bubble: Bubble,
+  width: number,
+  height: number,
+  now: number,
+  seconds: number
+) {
+  const age = now - bubble.bornAt;
+  const alpha = envelope(age, MEMO_LIFETIME_MS, 0.04, 0.25);
+  if (alpha <= 0) {
+    bubble.hit = null;
+    return;
+  }
+
+  // Drifts upward over its life, with a slow sway.
+  const rise = (age / MEMO_LIFETIME_MS) * height * 0.28;
+  const sway = Math.sin(seconds * 0.6 + bubble.swayPhase) * 10;
+  const cx = bubble.xFrac * width + sway;
+  const cy = bubble.yFrac * height - rise;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = '13px system-ui, sans-serif';
+  ctx.textBaseline = 'top';
+
+  const maxW = Math.min(width * 0.62, 230);
+  const lines = wrapText(ctx, bubble.body, maxW - 24);
+  const textW = Math.max(...lines.map((l) => ctx.measureText(l).width));
+  const w = Math.min(maxW, textW + 24);
+  const h = lines.length * 18 + 18;
+  const x = Math.max(8, Math.min(width - w - 8, cx - w / 2));
+  const y = Math.max(8, cy - h / 2);
+
+  roundRect(ctx, x, y, w, h, 14);
+  ctx.fillStyle = 'rgba(233, 244, 248, 0.93)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(10, 32, 45, 0.92)';
+  lines.forEach((line, i) => ctx.fillText(line, x + 12, y + 9 + i * 18));
+
+  ctx.restore();
+  bubble.hit = { x, y, w, h };
+}
+
+function drawHeart(
+  ctx: CanvasRenderingContext2D,
+  heart: Heart,
+  width: number,
+  height: number,
+  now: number
+) {
+  const age = now - heart.bornAt;
+  const alpha = envelope(age, HEART_LIFETIME_MS, 0.1, 0.55);
+  if (alpha <= 0) return;
+  const x = heart.xFrac * width;
+  const y = heart.yFrac * height - (age / HEART_LIFETIME_MS) * 70;
+  const s = 9;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y);
+  ctx.fillStyle = 'rgba(255, 140, 160, 0.95)';
+  ctx.beginPath();
+  ctx.moveTo(0, s * 0.75);
+  ctx.bezierCurveTo(-s, -s * 0.2, -s * 0.5, -s, 0, -s * 0.4);
+  ctx.bezierCurveTo(s * 0.5, -s, s, -s * 0.2, 0, s * 0.75);
+  ctx.fill();
   ctx.restore();
 }
 
@@ -79,27 +299,75 @@ export default function Aquarium({
   userId,
   mood = 'calm',
   onPeerChange,
+  onChannelReady,
+  onRoomUpdate,
 }: {
   supabase: SupabaseClient;
   roomId: string;
   userId: string;
   mood?: TankMood;
   onPeerChange?: (peerPresent: boolean) => void;
+  /** Hands the shared channel up so the controls overlay can send on it. */
+  onChannelReady?: (channel: RealtimeChannel | null) => void;
+  /**
+   * Room-level state that isn't drawn on the canvas. Aquarium owns the single
+   * channel — Supabase requires every .on() before .subscribe() — so listeners
+   * live here and forward upward rather than each component opening its own.
+   */
+  onRoomUpdate?: (row: RoomRow) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fishRef = useRef<LocalFish[]>([]);
+  const coralsRef = useRef<Coral[]>([]);
+  const bubblesRef = useRef<Bubble[]>([]);
+  const heartsRef = useRef<Heart[]>([]);
   /** Ids to drop on the next frame: handoff confirmed, or ownership revoked. */
   const pendingRemovalRef = useRef<Set<string>>(new Set());
   const peersRef = useRef<string[]>([]);
   const channelRef = useRef<RealtimeChannel | null>(null);
-  const moodRef = useRef<TankMood>(mood);
+  const moodFadeRef = useRef<{ from: [RGB, RGB]; to: [RGB, RGB]; startedAt: number }>(
+    { from: moodStops(mood), to: moodStops(mood), startedAt: 0 }
+  );
+  const paintedRef = useRef<[RGB, RGB]>(moodStops(mood));
   const [fishCount, setFishCount] = useState(0);
+  /**
+   * "corals:bubbles:hearts" — the only readable signal for the ambient layer,
+   * which is otherwise pure canvas pixels. Surfaced as a data attribute so the
+   * E2E suite can assert that one client's warmth actually reaches the other.
+   * Throttled, because it changes inside the render loop.
+   */
+  const [fx, setFx] = useState('0:0:0');
+  const fxRef = useRef('0:0:0');
+  /**
+   * "x,y,w,h" of the topmost tappable memo bubble, in CSS px. Bubbles drift, so
+   * without this a test (or any automation) has to guess where to click.
+   */
+  const [bubbleBox, setBubbleBox] = useState('');
+  const bubbleBoxRef = useRef('');
 
-  // The render loop reads the mood from a ref so a mood change doesn't tear
-  // down and restart the loop.
+  // Cross-fade from whatever is on screen right now, so a mood change during
+  // an earlier fade does not snap.
   useEffect(() => {
-    moodRef.current = mood;
+    moodFadeRef.current = {
+      from: [paintedRef.current[0], paintedRef.current[1]],
+      to: moodStops(mood),
+      startedAt: performance.now(),
+    };
   }, [mood]);
+
+  /**
+   * Count of fish this screen is actually drawing — excludes any mid-handoff.
+   * A fish in flight has already stopped being rendered here but stays in the
+   * array until its holder write is confirmed, so counting it would claim the
+   * fish is on two screens at once during that window.
+   *
+   * Called at every mutation point rather than from the render loop, because a
+   * backgrounded tab still adopts fish (realtime callbacks keep firing) even
+   * though requestAnimationFrame is paused.
+   */
+  const syncFishCount = useCallback(() => {
+    setFishCount(fishRef.current.filter((fish) => !fish.handingOff).length);
+  }, []);
 
   // ------------------------------------------------ realtime + reconciliation
   useEffect(() => {
@@ -130,7 +398,33 @@ export default function Aquarium({
         bobPhase: bobPhaseFor(fish.id),
         handingOff: false,
       });
-      setFishCount(fishRef.current.length);
+      syncFishCount();
+    };
+
+    const addCoral = (id: string, xFrac: number) => {
+      if (coralsRef.current.some((c) => c.id === id)) return;
+      coralsRef.current.push({ id, xFrac, bornAt: performance.now() });
+      if (coralsRef.current.length > MAX_CORALS) coralsRef.current.shift();
+    };
+
+    const addBubble = (id: string, body: string, xFrac: number, yFrac: number) => {
+      if (bubblesRef.current.some((b) => b.id === id)) return;
+      bubblesRef.current.push({
+        id,
+        body,
+        xFrac,
+        yFrac,
+        bornAt: performance.now(),
+        swayPhase: hashUnit(id, 3) * 6.283,
+        hit: null,
+      });
+      if (bubblesRef.current.length > MAX_BUBBLES) bubblesRef.current.shift();
+    };
+
+    const addHeart = (id: string, xFrac: number, yFrac: number) => {
+      if (heartsRef.current.some((h) => h.id === id)) return;
+      heartsRef.current.push({ id, xFrac, yFrac, bornAt: performance.now() });
+      if (heartsRef.current.length > MAX_HEARTS) heartsRef.current.shift();
     };
 
     /**
@@ -154,6 +448,22 @@ export default function Aquarium({
       (data as FishRow[] | null)?.forEach(adopt);
     };
 
+    /** Recent memos become bubbles, so arriving later still shows you them. */
+    const loadMemos = async () => {
+      const { data } = await supabase
+        .from('memos')
+        .select('id, body, created_at')
+        .eq('room_id', roomId)
+        .order('created_at', { ascending: false })
+        .limit(MEMO_BACKLOG);
+      if (!active) return;
+      const rows = (data as Pick<MemoRow, 'id' | 'body' | 'created_at'>[]) ?? [];
+      // Oldest first, so the newest ends up nearest the bottom.
+      [...rows].reverse().forEach((m) => {
+        addBubble(m.id, m.body, 0.25 + hashUnit(m.id) * 0.5, 0.55 + hashUnit(m.id, 1) * 0.3);
+      });
+    };
+
     /**
      * Presence says we are alone, so any fish still assigned to the absent
      * partner would be stranded — nobody is simulating it. Claim the room.
@@ -170,9 +480,12 @@ export default function Aquarium({
     };
 
     const channel = supabase.channel(`room:${roomId}`, {
-      config: { presence: { key: userId } },
+      // self: true so a sender also sees its own warmth / memo / heart. The
+      // FISH_CROSS handler filters on toUser, so it is unaffected.
+      config: { presence: { key: userId }, broadcast: { self: true } },
     });
     channelRef.current = channel;
+    onChannelReady?.(channel);
 
     channel
       .on('presence', { event: 'sync' }, () => {
@@ -201,6 +514,18 @@ export default function Aquarium({
           color: crossing.color,
         });
       })
+      .on('broadcast', { event: 'WARMTH_SENT' }, ({ payload }) => {
+        const warmth = payload as WarmthPayload;
+        addCoral(warmth.id, warmth.xFrac);
+      })
+      .on('broadcast', { event: 'MEMO_SENT' }, ({ payload }) => {
+        const memo = payload as MemoPayload;
+        addBubble(memo.id, memo.body, memo.xFrac, memo.yFrac);
+      })
+      .on('broadcast', { event: 'HEART_SENT' }, ({ payload }) => {
+        const heart = payload as HeartPayload;
+        addHeart(heart.id, heart.xFrac, heart.yFrac);
+      })
       .on(
         'postgres_changes',
         {
@@ -223,11 +548,43 @@ export default function Aquarium({
           }
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'rooms',
+          filter: `id=eq.${roomId}`,
+        },
+        (payload) => {
+          onRoomUpdate?.(payload.new as RoomRow);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'memos',
+          filter: `room_id=eq.${roomId}`,
+        },
+        (payload) => {
+          // Safety net for a dropped MEMO_SENT broadcast, same split as fish.
+          const row = payload.new as MemoRow;
+          addBubble(
+            row.id,
+            row.body,
+            0.25 + hashUnit(row.id) * 0.5,
+            0.55 + hashUnit(row.id, 1) * 0.3
+          );
+        }
+      )
       .subscribe((status) => {
         if (status !== 'SUBSCRIBED') return;
         void (async () => {
           await channel.track({ at: Date.now() });
           await recover();
+          await loadMemos();
         })();
       });
 
@@ -235,9 +592,18 @@ export default function Aquarium({
       active = false;
       if (aloneTimer) clearTimeout(aloneTimer);
       channelRef.current = null;
+      onChannelReady?.(null);
       void supabase.removeChannel(channel);
     };
-  }, [supabase, roomId, userId, onPeerChange]);
+  }, [
+    supabase,
+    roomId,
+    userId,
+    onPeerChange,
+    onChannelReady,
+    onRoomUpdate,
+    syncFishCount,
+  ]);
 
   // ------------------------------------------------------------ canvas sizing
   useEffect(() => {
@@ -262,6 +628,38 @@ export default function Aquarium({
     return () => observer.disconnect();
   }, []);
 
+  // --------------------------------------------- tap a memo to send a heart
+  const handlePointerDown = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+
+      // Topmost (most recently added) bubble wins.
+      for (let i = bubblesRef.current.length - 1; i >= 0; i -= 1) {
+        const b = bubblesRef.current[i];
+        const hit = b.hit;
+        if (!hit) continue;
+        if (px >= hit.x && px <= hit.x + hit.w && py >= hit.y && py <= hit.y + hit.h) {
+          const payload: HeartPayload = {
+            id: `${b.id}:${Date.now()}`,
+            xFrac: (hit.x + hit.w / 2) / rect.width,
+            yFrac: hit.y / rect.height,
+          };
+          void channelRef.current?.send({
+            type: 'broadcast',
+            event: 'HEART_SENT',
+            payload,
+          });
+          return;
+        }
+      }
+    },
+    []
+  );
+
   // ------------------------------------------------------- render + handoff
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -271,6 +669,7 @@ export default function Aquarium({
     let raf = 0;
     let last = performance.now();
     const start = last;
+    let lastFxAt = 0;
 
     /**
      * Two-phase handoff. The fish is held locally, not removed, until the
@@ -279,6 +678,8 @@ export default function Aquarium({
      */
     const handOff = async (fish: LocalFish, peer: string) => {
       fish.handingOff = true;
+      // We have stopped drawing it as of now, so stop counting it as of now.
+      syncFishCount();
 
       const payload: FishCrossPayload = {
         fishId: fish.id,
@@ -308,16 +709,24 @@ export default function Aquarium({
         // Keep the fish, turn it around, try again on the next lap.
         fish.handingOff = false;
         fish.direction = (fish.direction * -1) as FishDirection;
+        syncFishCount();
         return;
       }
       pendingRemovalRef.current.add(fish.id);
     };
 
-    const paintBackground = (width: number, height: number) => {
-      const [top, bottom] = TANK_MOOD_GRADIENT[moodRef.current];
+    const paintBackground = (width: number, height: number, now: number) => {
+      const fade = moodFadeRef.current;
+      const t = fade.startedAt
+        ? Math.min(1, (now - fade.startedAt) / MOOD_FADE_MS)
+        : 1;
+      const top = lerpRgb(fade.from[0], fade.to[0], t);
+      const bottom = lerpRgb(fade.from[1], fade.to[1], t);
+      paintedRef.current = [top, bottom];
+
       const gradient = ctx.createLinearGradient(0, 0, 0, height);
-      gradient.addColorStop(0, top);
-      gradient.addColorStop(1, bottom);
+      gradient.addColorStop(0, rgbCss(top));
+      gradient.addColorStop(1, rgbCss(bottom));
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, width, height);
     };
@@ -330,7 +739,15 @@ export default function Aquarium({
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
 
-      paintBackground(width, height);
+      paintBackground(width, height, now);
+
+      // Warmth sits behind the fish, near the floor.
+      coralsRef.current = coralsRef.current.filter(
+        (c) => now - c.bornAt < WARMTH_LIFETIME_MS
+      );
+      for (const coral of coralsRef.current) {
+        drawCoral(ctx, coral, width, height, now, seconds);
+      }
 
       const pending = pendingRemovalRef.current;
       let removed = false;
@@ -362,19 +779,62 @@ export default function Aquarium({
         return true;
       });
 
-      if (removed) setFishCount(fishRef.current.length);
+      // Memos and hearts read in front of the fish.
+      bubblesRef.current = bubblesRef.current.filter(
+        (b) => now - b.bornAt < MEMO_LIFETIME_MS
+      );
+      for (const bubble of bubblesRef.current) {
+        drawBubble(ctx, bubble, width, height, now, seconds);
+      }
+
+      heartsRef.current = heartsRef.current.filter(
+        (h) => now - h.bornAt < HEART_LIFETIME_MS
+      );
+      for (const heart of heartsRef.current) {
+        drawHeart(ctx, heart, width, height, now);
+      }
+
+      if (removed) syncFishCount();
+
+      if (now - lastFxAt > 250) {
+        lastFxAt = now;
+        const next = `${coralsRef.current.length}:${bubblesRef.current.length}:${heartsRef.current.length}`;
+        if (next !== fxRef.current) {
+          fxRef.current = next;
+          setFx(next);
+        }
+
+        let topHit: Bubble['hit'] = null;
+        for (let i = bubblesRef.current.length - 1; i >= 0; i -= 1) {
+          if (bubblesRef.current[i].hit) {
+            topHit = bubblesRef.current[i].hit;
+            break;
+          }
+        }
+        const boxNext = topHit
+          ? `${Math.round(topHit.x)},${Math.round(topHit.y)},${Math.round(topHit.w)},${Math.round(topHit.h)}`
+          : '';
+        if (boxNext !== bubbleBoxRef.current) {
+          bubbleBoxRef.current = boxNext;
+          setBubbleBox(boxNext);
+        }
+      }
+
       raf = requestAnimationFrame(frame);
     };
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [supabase, roomId, userId]);
+  }, [supabase, roomId, userId, syncFishCount]);
 
   return (
     <>
       <canvas
         ref={canvasRef}
-        className="block h-full w-full"
+        onPointerDown={handlePointerDown}
+        className="block h-full w-full touch-none"
+        data-kibo-fx={fx}
+        data-kibo-bubble={bubbleBox}
         role="img"
         aria-label={
           fishCount === 0

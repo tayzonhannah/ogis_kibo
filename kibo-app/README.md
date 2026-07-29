@@ -4,7 +4,8 @@ Shared aquarium for two. See [`../Agent.md`](../Agent.md) for the design, the
 locked decisions, and the per-phase verification checklists.
 
 **Implemented:** Phase 0 (setup), Phase 1 (schema, RLS, room join), Phase 2
-(canvas + fish handoff). Phases 3–5 are specced in `Agent.md` but not built.
+(canvas + fish handoff), Phase 3 (warmth, mood, memos). Phases 4–5 are specced
+in `Agent.md` but not built.
 
 ## Setup
 
@@ -59,6 +60,25 @@ It checks `kibo_schema_version()` first and stops if the expected migration isn'
 Each run leaves ~5 anonymous users and 2 rooms behind. Clear them under Authentication → Users if you like.
 
 > Keep this script ASCII-only. PowerShell 5.1 reads a UTF-8-no-BOM `.ps1` as cp1252, where an em dash's trailing byte `0x94` becomes a smart closing quote and silently terminates a string literal.
+
+## Verifying the tank end to end
+
+```bash
+npm run dev          # in one terminal
+node scripts/e2e-handoff.mjs
+```
+
+23 checks driving two real browser contexts (separate storage, so two genuine
+anonymous identities and two room slots). Covers the fish handoff in both
+directions, the "exactly 2 fish across both screens" invariant, orphan reclaim,
+solo reflection, reload recovery, and the Phase 3 layer: warmth and memos
+crossing to the other client, tapping a memo to send a heart back, and mood
+propagating *and* surviving a reload.
+
+The warmth glow, memo bubbles and hearts are drawn straight to canvas, so the
+canvas publishes `data-kibo-fx` ("corals:bubbles:hearts") and `data-kibo-bubble`
+(the topmost bubble's hit box) for the suite to read. Bubbles drift, so without
+the hit box a click is aiming at a moving target.
 
 ## Verifying the handoff
 

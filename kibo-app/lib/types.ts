@@ -75,6 +75,28 @@ export type JoinStatus =
  */
 export type JoinRoomRow = { status: JoinStatus; joined_room: string | null };
 
+/**
+ * Phase 3 broadcast payloads.
+ *
+ * Warmth and hearts are broadcast-only and intentionally lossy: a gesture
+ * nobody was present for is a missed moment, not lost state. Memos are the
+ * opposite — they persist in `memos` and broadcast only as the fast path, the
+ * same split as fish handoff.
+ *
+ * Positions travel as fractions of the viewport so they land in the same
+ * relative place on a phone and a laptop.
+ */
+export type WarmthPayload = { id: string; xFrac: number };
+
+export type MemoPayload = {
+  id: string;
+  body: string;
+  xFrac: number;
+  yFrac: number;
+};
+
+export type HeartPayload = { id: string; xFrac: number; yFrac: number };
+
 /** Errors from the room lifecycle RPCs, surfaced as distinct UI states. */
 export type RoomError =
   | 'room_not_found'

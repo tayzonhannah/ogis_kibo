@@ -3,16 +3,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import type { RealtimeChannel } from '@supabase/supabase-js';
 import Aquarium from '@/components/Aquarium';
+import TankControls from '@/components/TankControls';
 import { useAuth } from '@/components/AuthProvider';
 import { useHeartbeat } from '@/lib/useHeartbeat';
-import { normalizeCode } from '@/lib/constants';
+import { normalizeCode, type TankMood } from '@/lib/constants';
 import {
   ROOM_ERROR_COPY,
   joinStatusToError,
   toRoomError,
   type JoinRoomRow,
   type RoomError,
+  type RoomRow,
 } from '@/lib/types';
 
 type JoinState =
@@ -27,6 +30,8 @@ export default function RoomClient({ code }: { code: string }) {
   const [join, setJoin] = useState<JoinState>({ phase: 'waiting' });
   const [peerPresent, setPeerPresent] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [mood, setMood] = useState<TankMood>('calm');
+  const [channel, setChannel] = useState<RealtimeChannel | null>(null);
   const joinedRef = useRef(false);
 
   const normalized = normalizeCode(code);
@@ -84,9 +89,33 @@ export default function RoomClient({ code }: { code: string }) {
   const roomId = join.phase === 'ready' ? join.roomId : null;
   useHeartbeat(supabase, roomId, userId);
 
-  // Stable identity: Aquarium re-subscribes its channel if this changes.
+  // Initial mood. Live changes arrive via Aquarium's rooms listener below.
+  useEffect(() => {
+    if (!supabase || !roomId) return;
+    void (async () => {
+      const { data } = await supabase
+        .from('rooms')
+        .select('tank_mood')
+        .eq('id', roomId)
+        .single();
+      const next = (data as Pick<RoomRow, 'tank_mood'> | null)?.tank_mood;
+      if (next) setMood(next);
+    })();
+  }, [supabase, roomId]);
+
+  // These three must be referentially stable: they are dependencies of
+  // Aquarium's channel effect, and a new identity would tear down and re-open
+  // the realtime subscription on every render.
   const handlePeerChange = useCallback((present: boolean) => {
     setPeerPresent(present);
+  }, []);
+
+  const handleChannelReady = useCallback((next: RealtimeChannel | null) => {
+    setChannel(next);
+  }, []);
+
+  const handleRoomUpdate = useCallback((row: RoomRow) => {
+    if (row.tank_mood) setMood(row.tank_mood);
   }, []);
 
   const leave = async () => {
@@ -131,7 +160,10 @@ export default function RoomClient({ code }: { code: string }) {
           supabase={supabase}
           roomId={roomId}
           userId={userId}
+          mood={mood}
           onPeerChange={handlePeerChange}
+          onChannelReady={handleChannelReady}
+          onRoomUpdate={handleRoomUpdate}
         />
       ) : (
         <div className="flex h-full items-center justify-center">
@@ -141,6 +173,17 @@ export default function RoomClient({ code }: { code: string }) {
           </p>
         </div>
       )}
+
+      {roomId && supabase && userId ? (
+        <TankControls
+          supabase={supabase}
+          roomId={roomId}
+          userId={userId}
+          channel={channel}
+          mood={mood}
+          onMoodPicked={setMood}
+        />
+      ) : null}
 
       {/* Overlay. Deliberately quiet: presence is ambient, not a status feed. */}
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between p-5">

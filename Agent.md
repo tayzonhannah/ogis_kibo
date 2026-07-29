@@ -765,7 +765,9 @@ These are the acceptance tests. All must pass before Phase 3.
 
 ## Phase 3: Ambient Interactions
 
-Do not start until every Phase 2 check passes.
+**Built and verified.** Migration `0003`, `components/TankControls.tsx`, and the warmth/memo/heart/mood layers in `Aquarium.tsx`. Verified by `scripts/e2e-handoff.mjs` (23 checks, stable over four consecutive runs).
+
+Mood names are still the placeholders `calm / deep / bright / murky / warm`, pending a real vocabulary. They live in one `check` constraint plus `TANK_MOODS` in `lib/constants.ts` — renaming them is a one-line migration and a one-line constant change.
 
 ### 1. Send Warmth
 
@@ -789,6 +791,22 @@ Do not start until every Phase 2 check passes.
 - **Canvas:** render text inside a floating bubble in the render loop. `ctx.fillText` is not an HTML injection surface, but still clip to the bubble and store each bubble's current bounds on the memo object so clicks can be hit-tested.
 - **Retract:** either participant can soft-delete any memo in the room (`update memos set deleted_at = now()`). For a two-person space this is the whole moderation story; cleanup drops tombstones after 7 days.
 - **Reply:** clicking a bubble sends a heart back over broadcast.
+- **Backlog:** on subscribe, the five most recent memos are loaded as bubbles, so arriving later still shows you what was left.
+
+### One channel, listeners registered before subscribe
+
+Supabase requires every `.on()` before `.subscribe()`, so a component cannot attach a listener to a channel someone else already subscribed. `Aquarium` therefore owns the single `room:<id>` channel and registers **all** listeners — fish, warmth, memos, hearts, and the `rooms` row. Anything not drawn on the canvas is forwarded upward through `onRoomUpdate`; `onChannelReady` hands the channel out so `TankControls` can send on it.
+
+Those callbacks must be referentially stable (`useCallback` with `[]`) — they are dependencies of the channel effect, and a fresh identity tears down and re-opens the subscription on every render.
+
+The channel is opened with `broadcast: { self: true }` so a sender also sees its own warmth, memo, and heart. `FISH_CROSS` filters on `toUser`, so it is unaffected.
+
+### Two behaviours worth knowing before Phase 4
+
+Both surfaced while writing the browser test, and both are properties of the design rather than bugs:
+
+1. **Only the holder simulates a fish, and `requestAnimationFrame` is paused in a backgrounded tab.** So if the holder's tab isn't visible, its fish stop moving and no handoff fires. Receiving is unaffected — adoption happens in a realtime callback. This is benign today and arguably correct for Phase 4 (a pocketed phone shouldn't be animating), but it means "both people away" freezes the tank rather than continuing it. Decide deliberately whether the nutrient score should keep accruing while nothing moves.
+2. **Handoff is eventually consistent, and any count must exclude fish in flight.** B adopts from the broadcast *before* A's `holder` write resolves, so for a few hundred milliseconds the fish is logically owned by B while A still holds a record of it. A fish marked `handingOff` has already stopped being drawn, so it must not be counted — counting it claims the fish is on two screens at once. Assert the "exactly N fish across both screens" invariant with a wait, never instantaneously.
 
 ---
 

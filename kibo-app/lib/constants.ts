@@ -24,6 +24,23 @@ export const MAX_AWAY_CREDIT_SECONDS = 28_800;
 /** Off-screen buffer, in CSS px, before a fish counts as having exited. */
 export const FISH_MARGIN = 40;
 
+/** Phase 3 timings. Nothing snaps; the tank is weather, not a notification. */
+export const WARMTH_LIFETIME_MS = 5_000;
+export const MEMO_LIFETIME_MS = 40_000;
+export const HEART_LIFETIME_MS = 2_200;
+export const MOOD_FADE_MS = 2_000;
+
+/** Client-side gesture throttles. The DB enforces the memo limit for real. */
+export const WARMTH_COOLDOWN_MS = 3_000;
+
+/** Caps so a fast sender cannot grow these arrays without bound. */
+export const MAX_CORALS = 12;
+export const MAX_BUBBLES = 6;
+export const MAX_HEARTS = 20;
+
+/** How many recent memos to show as bubbles when you open the tank. */
+export const MEMO_BACKLOG = 5;
+
 /** Must match the rooms.tank_mood check constraint. */
 export const TANK_MOODS = ['calm', 'deep', 'bright', 'murky', 'warm'] as const;
 export type TankMood = (typeof TANK_MOODS)[number];

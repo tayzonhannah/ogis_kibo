@@ -96,12 +96,12 @@ Write-Host "=== 0. Which migration is actually live?"
 $ver = (Req 'POST' "$base/rest/v1/rpc/kibo_schema_version" '{}' $null)
 $live = if ($ver.code -eq 200) { ($ver.body | ConvertFrom-Json) } else { "unavailable ($($ver.code))" }
 Write-Host "         deployed schema version: $live"
-if ($live -ne '0002c') {
-  Write-Host "  [STOP] Expected 0002c. The migration file has not been applied."
+if ($live -ne '0003') {
+  Write-Host "  [STOP] Expected 0003. The migration file has not been applied."
   Write-Host "         Re-run kibo-app/supabase/migrations/0002_join_room_returns_status.sql"
   exit 2
 }
-Write-Host "  [PASS] migration 0002c is live"
+Write-Host "  [PASS] migration 0003 is live"
 $script:pass++
 
 Write-Host "`n=== 0b. Sanity: token actually authenticates"
@@ -110,6 +110,7 @@ Check 'anonymous sign-in returns a usable token' ($A -is [string] -and $A.Length
 if (-not ($A -is [string])) { Write-Host "`nAborting."; exit 1 }
 $r = Req 'GET' "$base/rest/v1/rooms?select=id" $null $A
 Check 'authenticated GET is not 401' ($r.code -eq 200) "$($r.code) $($r.body)"
+$aUserId = ((Req 'GET' "$base/auth/v1/user" $null $A).body | ConvertFrom-Json).id
 
 Write-Host "`n=== 1. create_room"
 $r = Rpc 'create_room' '{}' $A
@@ -184,6 +185,40 @@ Check 'holder can hand a fish to a room-mate' ($r.code -lt 300) "$($r.code) $($r
 $moved = JArr (Req 'GET' "$base/rest/v1/fish?select=id,holder,direction,updated_at&id=eq.$fishId" $null $B).body
 Check 'fish now held by the other participant' ($moved.Count -eq 1 -and $moved[0].holder -eq $bUserId) "$($moved | ConvertTo-Json -Compress)"
 Check 'updated_at maintained by trigger, not the client' ($moved.Count -eq 1 -and $moved[0].updated_at) 'no updated_at'
+
+Write-Host "`n=== 10b. Memos (Phase 3)"
+function Memo($body, $author, $token) {
+  return Req 'POST' "$base/rest/v1/memos" (@{
+    room_id = $roomId; author = $author; body = $body
+  } | ConvertTo-Json -Compress) $token
+}
+$r = Memo 'first memo' $aUserId $A
+Check 'member can leave a memo' ($r.code -lt 300) "$($r.code) $($r.body)"
+
+$r = Memo 'forged author' $bUserId $A
+Check 'cannot post a memo as someone else' ($r.code -eq 403 -and $r.body -match 'row-level security|42501') "$($r.code) $($r.body)"
+
+$r = Memo ('x' * 200) $aUserId $A
+Check 'over-length memo rejected by check constraint' ($r.body -match '23514|violates check constraint') "$($r.code) $($r.body)"
+
+# The insert policy authorises WHO, the trigger authorises HOW OFTEN.
+$memoLimitAt = 0
+for ($i = 2; $i -le 14; $i++) {
+  $r = Memo "flood $i" $aUserId $A
+  if ($r.body -match 'memo_rate_limited') { $memoLimitAt = $i; break }
+}
+Check 'memo rate limiter trips within 14 attempts' ($memoLimitAt -gt 0) "never tripped"
+
+$mine = JArr (Req 'GET' "$base/rest/v1/memos?select=id,body" $null $A).body
+Check 'memos are readable by the room' ($mine.Count -ge 1) "$($mine.Count)"
+$theirs = JArr (Req 'GET' "$base/rest/v1/memos?select=id" $null $C).body
+Check 'memos are NOT readable by a non-member' ($theirs.Count -eq 0) "$($theirs.Count)"
+
+$memoId = $mine[0].id
+$r = Req 'PATCH' "$base/rest/v1/memos?id=eq.$memoId" '{"deleted_at":"2026-01-01T00:00:00Z"}' $A
+Check 'either participant can retract a memo' ($r.code -lt 300) "$($r.code) $($r.body)"
+$after = JArr (Req 'GET' "$base/rest/v1/memos?select=id&id=eq.$memoId" $null $A).body
+Check 'a retracted memo disappears from reads' ($after.Count -eq 0) "$($after.Count)"
 
 Write-Host "`n=== 11. Join rate limit (10 failures / 15 min)"
 $D = NewUser 'D'
