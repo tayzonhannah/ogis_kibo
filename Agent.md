@@ -776,7 +776,7 @@ These are the acceptance tests. All must pass before Phase 3.
 
 **Built and verified.** Migration `0003`, `components/TankControls.tsx`, and the warmth/memo/heart/mood layers in `Aquarium.tsx`. Verified by `scripts/e2e-handoff.mjs` (23 checks, stable over four consecutive runs).
 
-Mood names are still the placeholders `calm / deep / bright / murky / warm`, pending a real vocabulary. They live in one `check` constraint plus `TANK_MOODS` in `lib/constants.ts` — renaming them is a one-line migration and a one-line constant change.
+**Mood vocabulary: `calm / deep / bright / murky / warm`, kept deliberately.** These began as placeholders and were reviewed and retained, so treat them as the vocabulary rather than a TODO. If they ever change, they live in exactly two places — the `tank_mood` check constraint and `TANK_MOODS` in `lib/constants.ts` — plus `TANK_MOOD_LABELS` and `TANK_MOOD_GRADIENT` for the display name and colours.
 
 ### 1. Send Warmth
 
