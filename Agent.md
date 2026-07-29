@@ -313,7 +313,22 @@ begin
 end;
 $$;
 
-create function join_room(room_code text) returns uuid
+-- Returns a status row rather than raising. This is load-bearing, not style:
+-- RAISE EXCEPTION aborts the transaction, and because PostgREST runs each RPC
+-- in its own transaction, a raise would roll back the join_attempts insert
+-- that the rate limiter counts. The first implementation did exactly that, so
+-- the ledger stayed empty and the throttle never fired. A function that must
+-- persist a side effect cannot report failure by raising.
+--
+-- `not_authenticated` still raises: nothing to persist, no session at all.
+--
+-- The output field is `joined_room`, NOT `room_id`. An OUT parameter named
+-- room_id shadows room_participants.room_id and the function fails at runtime
+-- with 42702 "column reference is ambiguous" — only on the paths that reach
+-- that table, which makes it easy to miss. Aliasing the WHERE clauses is not a
+-- complete fix, because an INSERT column list cannot be qualified.
+create function join_room(room_code text)
+returns table (status text, joined_room uuid)
 language plpgsql security definer set search_path = public as $$
 declare
   caller uuid := auth.uid();
@@ -328,41 +343,50 @@ begin
   where user_id = caller
     and succeeded = false
     and attempted_at > now() - interval '15 minutes';
-  if recent_failures >= 10 then raise exception 'too_many_attempts'; end if;
+  if recent_failures >= 10 then
+    -- No extra attempt recorded: a throttled caller must not be able to
+    -- extend their own lockout.
+    return query select 'too_many_attempts'::text, null::uuid;
+    return;
+  end if;
 
   select id into target from rooms where code = upper(trim(room_code));
 
   if target is null then
     insert into join_attempts (user_id, succeeded) values (caller, false);
-    raise exception 'room_not_found';
+    return query select 'room_not_found'::text, null::uuid;
+    return;
   end if;
 
   -- Idempotent rejoin: not a new attempt, no capacity check.
   if exists (
-    select 1 from room_participants where room_id = target and user_id = caller
+    select 1 from room_participants rp
+    where rp.room_id = target and rp.user_id = caller
   ) then
-    update room_participants set last_seen_at = now()
-    where room_id = target and user_id = caller;
-    return target;
+    update room_participants rp set last_seen_at = now()
+    where rp.room_id = target and rp.user_id = caller;
+    return query select 'ok'::text, target;
+    return;
   end if;
 
   -- Free the slot of anyone who has been silent past the staleness window.
   -- This is what rescues a room whose partner lost their anonymous session.
-  delete from room_participants
-  where room_id = target
-    and last_seen_at < now() - interval '14 days';
+  delete from room_participants rp
+  where rp.room_id = target
+    and rp.last_seen_at < now() - interval '14 days';
 
   select count(*) into occupants
-  from room_participants where room_id = target;
+  from room_participants rp where rp.room_id = target;
   if occupants >= 2 then
     insert into join_attempts (user_id, succeeded) values (caller, false);
-    raise exception 'room_full';
+    return query select 'room_full'::text, null::uuid;
+    return;
   end if;
 
   insert into room_participants (room_id, user_id) values (target, caller);
   insert into join_attempts (user_id, succeeded) values (caller, true);
   update rooms set last_interaction_at = now() where id = target;
-  return target;
+  return query select 'ok'::text, target;
 end;
 $$;
 
@@ -389,7 +413,21 @@ end;
 $$;
 ```
 
-`room_full` and `room_not_found` are distinct errors, which technically tells an attacker that a guessed code is real. The rate limit is what bounds enumeration; the alternative — one generic error — would leave a third friend trying to join a dyad with no idea why it failed. If that trade-off is unacceptable later, collapse both into `room_unavailable`.
+> **Any `security definer` function that both records something and can fail needs this shape.** If you add one, check whether its audit write survives its failure path — a rolled-back ledger fails silently and looks identical to a working one.
+>
+> **Name OUT parameters so they cannot collide with a column of any table the function touches.** `room_id` as an output field cost three deploy cycles.
+
+### Knowing what is actually deployed
+
+`kibo_schema_version()` returns a literal version string, declared **last** in each migration so a partially-executed script cannot report a version it never reached. Probe it before running any verification:
+
+```
+POST /rest/v1/rpc/kibo_schema_version   -> "0002c"
+```
+
+Bump the literal whenever a migration changes. This exists because three separate rounds of debugging were spent on symptoms that all reduced to "the migration I was testing was not the one deployed" — most often because the Supabase SQL Editor runs **only the highlighted text** when there is a selection.
+
+`room_full` and `room_not_found` are distinct statuses, which technically tells an attacker that a guessed code is real. The rate limit is what bounds enumeration; the alternative — one generic error — would leave a third friend trying to join a dyad with no idea why it failed. If that trade-off is unacceptable later, collapse both into `room_unavailable`.
 
 ### Nightly cleanup
 
@@ -406,6 +444,8 @@ $$);
 Room deletion cascades to participants, fish, and memos. Without this, nothing in the system ever deletes anything.
 
 ### Phase 1 verification
+
+**Verified green against the live project (38/38).** These are runnable over plain REST with the anon key — no browser needed — by signing in several anonymous users and exercising the RPCs as a client would. Check `kibo_schema_version()` first; a stale deployment makes every other result meaningless.
 
 - Two browser profiles both `signInAnonymously()` and get different `auth.uid()`s.
 - Both join the same code; `room_participants` has two rows. A **third** profile joining the same code fails with `room_full`.

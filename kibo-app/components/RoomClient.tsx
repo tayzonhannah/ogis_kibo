@@ -7,7 +7,13 @@ import Aquarium from '@/components/Aquarium';
 import { useAuth } from '@/components/AuthProvider';
 import { useHeartbeat } from '@/lib/useHeartbeat';
 import { normalizeCode } from '@/lib/constants';
-import { ROOM_ERROR_COPY, toRoomError, type RoomError } from '@/lib/types';
+import {
+  ROOM_ERROR_COPY,
+  joinStatusToError,
+  toRoomError,
+  type JoinRoomRow,
+  type RoomError,
+} from '@/lib/types';
 
 type JoinState =
   | { phase: 'waiting' }
@@ -40,11 +46,20 @@ export default function RoomClient({ code }: { code: string }) {
         room_code: normalized,
       });
       if (!active) return;
+
+      // A raised error means no session at all. Everything else — unknown
+      // code, full room, throttled — comes back as a status row, so that the
+      // rate-limiter's ledger write survives the transaction.
       if (error) {
         setJoin({ phase: 'error', error: toRoomError(error.message) });
         return;
       }
-      setJoin({ phase: 'ready', roomId: data as string });
+      const row = (data as JoinRoomRow[] | null)?.[0];
+      if (!row || row.status !== 'ok' || !row.joined_room) {
+        setJoin({ phase: 'error', error: joinStatusToError(row?.status) });
+        return;
+      }
+      setJoin({ phase: 'ready', roomId: row.joined_room });
     })();
 
     return () => {

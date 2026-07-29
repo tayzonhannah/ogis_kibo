@@ -46,6 +46,20 @@ Open two browser profiles (or one normal + one incognito — *not* two tabs of
 the same profile, which share one anonymous identity and therefore one room
 slot). Create a tank in the first, copy the code, join from the second.
 
+## Verifying Phase 1
+
+```powershell
+.\scripts\verify-phase1.ps1
+```
+
+38 checks against your live project over plain REST — no browser needed. It signs in several throwaway anonymous users and exercises the room RPCs the way a client would: capacity cap, code enumeration, score forgery, fish theft, the join rate limiter, `leave_room` releasing fish. Reads its config from `.env.local`.
+
+It checks `kibo_schema_version()` first and stops if the expected migration isn't live. That gate exists because three rounds of debugging were lost to testing a function that wasn't the one deployed — the Supabase SQL Editor runs **only the highlighted text** when there's a selection, so a stale run looks like a successful one.
+
+Each run leaves ~5 anonymous users and 2 rooms behind. Clear them under Authentication → Users if you like.
+
+> Keep this script ASCII-only. PowerShell 5.1 reads a UTF-8-no-BOM `.ps1` as cp1252, where an em dash's trailing byte `0x94` becomes a smart closing quote and silently terminates a string literal.
+
 ## Verifying the handoff
 
 The Phase 2 acceptance tests are listed in `Agent.md`. The two that catch the
