@@ -10,6 +10,7 @@ import {
   WARMTH_COOLDOWN_MS,
   type TankMood,
 } from '@/lib/constants';
+import { fire } from '@/lib/supabase/fire';
 import type { MemoPayload, WarmthPayload } from '@/lib/types';
 
 /**
@@ -62,7 +63,9 @@ export default function TankControls({
       xFrac: 0.15 + Math.random() * 0.7,
     };
     void channel.send({ type: 'broadcast', event: 'WARMTH_SENT', payload });
-    void supabase.rpc('touch_room', { target_room: roomId });
+    // fire(), not void: an un-awaited rpc builder never sends the request, so
+    // the idle clock the nudge scheduler reads would never move.
+    fire(supabase.rpc('touch_room', { target_room: roomId }), 'touch_room');
   };
 
   const pickMood = async (next: TankMood) => {

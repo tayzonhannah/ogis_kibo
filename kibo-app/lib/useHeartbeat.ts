@@ -3,6 +3,7 @@
 import { useEffect } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { HEARTBEAT_MS } from './constants';
+import { fire } from './supabase/fire';
 
 /**
  * Refreshes last_seen_at while the tab is visible.
@@ -22,11 +23,15 @@ export function useHeartbeat(
 
     const beat = () => {
       if (document.visibilityState !== 'visible') return;
-      void supabase
-        .from('room_participants')
-        .update({ last_seen_at: new Date().toISOString() })
-        .eq('room_id', roomId)
-        .eq('user_id', userId);
+      // fire(), not void: an un-awaited builder never sends the request.
+      fire(
+        supabase
+          .from('room_participants')
+          .update({ last_seen_at: new Date().toISOString() })
+          .eq('room_id', roomId)
+          .eq('user_id', userId),
+        'heartbeat'
+      );
     };
 
     beat();
