@@ -11,6 +11,8 @@ import {
   MEMO_BACKLOG,
   MEMO_LIFETIME_MS,
   MOOD_FADE_MS,
+  PRESS_CANCEL_PX,
+  RETRACT_HOLD_MS,
   TANK_MOOD_GRADIENT,
   WARMTH_LIFETIME_MS,
   type TankMood,
@@ -21,6 +23,7 @@ import type {
   FishRow,
   HeartPayload,
   MemoPayload,
+  MemoRetractedPayload,
   MemoRow,
   RoomRow,
   WarmthPayload,
@@ -225,10 +228,14 @@ function drawBubble(
   width: number,
   height: number,
   now: number,
-  seconds: number
+  seconds: number,
+  /** 0..1 progress of a retract hold on this bubble. Fades it as you hold. */
+  pressT = 0
 ) {
   const age = now - bubble.bornAt;
-  const alpha = envelope(age, MEMO_LIFETIME_MS, 0.04, 0.25);
+  // The hold takes it most of the way out, so the removal at the end lands on an
+  // already-faint bubble rather than snapping something solid out of existence.
+  const alpha = envelope(age, MEMO_LIFETIME_MS, 0.04, 0.25) * (1 - 0.8 * pressT);
   if (alpha <= 0) {
     bubble.hit = null;
     return;
@@ -325,6 +332,19 @@ export default function Aquarium({
   const pendingRemovalRef = useRef<Set<string>>(new Set());
   const peersRef = useRef<string[]>([]);
   const channelRef = useRef<RealtimeChannel | null>(null);
+  /**
+   * The in-flight press on a memo bubble, if any. A ref rather than state: the
+   * render loop reads it every frame to fade the bubble, and one re-render per
+   * frame is exactly what the canvas exists to avoid.
+   */
+  const pressRef = useRef<{
+    bubbleId: string;
+    startedAt: number;
+    x: number;
+    y: number;
+    fired: boolean;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
   const moodFadeRef = useRef<{ from: [RGB, RGB]; to: [RGB, RGB]; startedAt: number }>(
     { from: moodStops(mood), to: moodStops(mood), startedAt: 0 }
   );
@@ -526,6 +546,14 @@ export default function Aquarium({
         const heart = payload as HeartPayload;
         addHeart(heart.id, heart.xFrac, heart.yFrac);
       })
+      .on('broadcast', { event: 'MEMO_RETRACTED' }, ({ payload }) => {
+        // The only live path for a retraction: the soft-deleted row stops
+        // satisfying the memos SELECT policy, so postgres_changes cannot carry
+        // it. See MemoRetractedPayload. Self-delivery is harmless — the sender
+        // has already removed it.
+        const { id } = payload as MemoRetractedPayload;
+        bubblesRef.current = bubblesRef.current.filter((b) => b.id !== id);
+      })
       .on(
         'postgres_changes',
         {
@@ -628,7 +656,47 @@ export default function Aquarium({
     return () => observer.disconnect();
   }, []);
 
-  // --------------------------------------------- tap a memo to send a heart
+  // ------------------------------- tap a memo for a heart, hold to retract it
+  //
+  // One pointer, two gestures, resolved by duration. Tap fires on pointerup so
+  // that a press which becomes a hold does not also send a heart, and a drag
+  // across the tank sends neither.
+
+  const clearPress = useCallback(() => {
+    const press = pressRef.current;
+    if (press) clearTimeout(press.timer);
+    pressRef.current = null;
+  }, []);
+
+  const retract = useCallback(
+    async (memoId: string) => {
+      // Awaited, not fired: the bubble should only disappear once the row really
+      // is retracted. Retraction goes through the RPC because a client UPDATE
+      // cannot soft-delete a row the SELECT policy then hides — see migration
+      // 0004.
+      const { error } = await supabase.rpc('retract_memo', {
+        target_memo: memoId,
+      });
+
+      if (error) {
+        console.warn(`[kibo] retract_memo failed: ${error.message}`);
+        pressRef.current = null; // lets the bubble fade back in
+        return;
+      }
+
+      bubblesRef.current = bubblesRef.current.filter((b) => b.id !== memoId);
+      pressRef.current = null;
+
+      const payload: MemoRetractedPayload = { id: memoId };
+      void channelRef.current?.send({
+        type: 'broadcast',
+        event: 'MEMO_RETRACTED',
+        payload,
+      });
+    },
+    [supabase]
+  );
+
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
@@ -643,22 +711,71 @@ export default function Aquarium({
         const hit = b.hit;
         if (!hit) continue;
         if (px >= hit.x && px <= hit.x + hit.w && py >= hit.y && py <= hit.y + hit.h) {
-          const payload: HeartPayload = {
-            id: `${b.id}:${Date.now()}`,
-            xFrac: (hit.x + hit.w / 2) / rect.width,
-            yFrac: hit.y / rect.height,
+          // Keep receiving move/up even if the finger slides off the bubble, or
+          // off the canvas entirely. Bubbles drift while you hold one.
+          try {
+            canvas.setPointerCapture(event.pointerId);
+          } catch {
+            // Not fatal: without capture the gesture still works as long as the
+            // pointer stays over the canvas, which fills the viewport.
+          }
+          const id = b.id;
+          pressRef.current = {
+            bubbleId: id,
+            startedAt: performance.now(),
+            x: event.clientX,
+            y: event.clientY,
+            fired: false,
+            timer: setTimeout(() => {
+              const press = pressRef.current;
+              if (!press || press.bubbleId !== id) return;
+              press.fired = true;
+              void retract(id);
+            }, RETRACT_HOLD_MS),
           };
-          void channelRef.current?.send({
-            type: 'broadcast',
-            event: 'HEART_SENT',
-            payload,
-          });
           return;
         }
       }
     },
-    []
+    [retract]
   );
+
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const press = pressRef.current;
+      if (!press || press.fired) return;
+      const dx = event.clientX - press.x;
+      const dy = event.clientY - press.y;
+      if (Math.hypot(dx, dy) > PRESS_CANCEL_PX) clearPress();
+    },
+    [clearPress]
+  );
+
+  const handlePointerUp = useCallback(() => {
+    const press = pressRef.current;
+    if (!press) return;
+    // The hold already fired; releasing must not also send a heart.
+    if (press.fired) return;
+
+    const bubble = bubblesRef.current.find((b) => b.id === press.bubbleId);
+    clearPress();
+
+    const canvas = canvasRef.current;
+    const hit = bubble?.hit;
+    if (!canvas || !hit) return;
+    const rect = canvas.getBoundingClientRect();
+
+    const payload: HeartPayload = {
+      id: `${bubble.id}:${Date.now()}`,
+      xFrac: (hit.x + hit.w / 2) / rect.width,
+      yFrac: hit.y / rect.height,
+    };
+    void channelRef.current?.send({
+      type: 'broadcast',
+      event: 'HEART_SENT',
+      payload,
+    });
+  }, [clearPress]);
 
   // ------------------------------------------------------- render + handoff
   useEffect(() => {
@@ -783,8 +900,13 @@ export default function Aquarium({
       bubblesRef.current = bubblesRef.current.filter(
         (b) => now - b.bornAt < MEMO_LIFETIME_MS
       );
+      const press = pressRef.current;
       for (const bubble of bubblesRef.current) {
-        drawBubble(ctx, bubble, width, height, now, seconds);
+        const pressT =
+          press && press.bubbleId === bubble.id
+            ? Math.min(1, (now - press.startedAt) / RETRACT_HOLD_MS)
+            : 0;
+        drawBubble(ctx, bubble, width, height, now, seconds, pressT);
       }
 
       heartsRef.current = heartsRef.current.filter(
@@ -832,6 +954,9 @@ export default function Aquarium({
       <canvas
         ref={canvasRef}
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={clearPress}
         className="block h-full w-full touch-none"
         data-kibo-fx={fx}
         data-kibo-bubble={bubbleBox}

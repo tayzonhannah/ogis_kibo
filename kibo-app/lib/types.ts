@@ -97,6 +97,21 @@ export type MemoPayload = {
 
 export type HeartPayload = { id: string; xFrac: number; yFrac: number };
 
+/**
+ * A retraction, which must travel by broadcast rather than postgres_changes.
+ *
+ * Retracting is an UPDATE that sets `deleted_at`, and the memos SELECT policy is
+ * `is_member(room_id) and deleted_at is null` — so the updated row no longer
+ * satisfies the policy the subscription reads through, and realtime does not
+ * deliver it. Unlike the fish and memo paths, there is no truth-path fallback
+ * available here, so this broadcast is the only live delivery.
+ *
+ * That is acceptable because a missed one self-heals rather than desyncing: the
+ * bubble expires on its own within MEMO_LIFETIME_MS, and the backlog query on
+ * next load already filters retracted memos out. The row is gone either way.
+ */
+export type MemoRetractedPayload = { id: string };
+
 /** Errors from the room lifecycle RPCs, surfaced as distinct UI states. */
 export type RoomError =
   | 'room_not_found'

@@ -33,6 +33,16 @@ export const MOOD_FADE_MS = 2_000;
 /** Client-side gesture throttles. The DB enforces the memo limit for real. */
 export const WARMTH_COOLDOWN_MS = 3_000;
 
+/**
+ * Hold a memo bubble this long to retract it; a shorter press is a tap, which
+ * sends a heart. The bubble dims as the hold progresses, so the gesture shows
+ * its own progress and needs no confirmation dialog.
+ */
+export const RETRACT_HOLD_MS = 700;
+
+/** Move further than this mid-press and it was a drag, so neither fires. */
+export const PRESS_CANCEL_PX = 12;
+
 /** Caps so a fast sender cannot grow these arrays without bound. */
 export const MAX_CORALS = 12;
 export const MAX_BUBBLES = 6;
