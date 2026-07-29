@@ -101,7 +101,7 @@ if ($live -ne '0004') {
   Write-Host "         Run the migrations in kibo-app/supabase/migrations/ in order."
   exit 2
 }
-Write-Host "  [PASS] migration 0003 is live"
+Write-Host "  [PASS] migration $live is live"
 $script:pass++
 
 Write-Host "`n=== 0b. Sanity: token actually authenticates"
