@@ -1,4 +1,4 @@
-import type { TankMood } from './constants';
+import type { LoveLanguage, TankMood } from './constants';
 
 export type RoomRow = {
   id: string;
@@ -9,6 +9,8 @@ export type RoomRow = {
   co_away_since: string | null;
   last_interaction_at: string;
   last_nudged_at: string | null;
+  /** Written only by app/api/nudge — no client update grant. See 0006. */
+  nudge_text: string | null;
 };
 
 export type ParticipantRow = {
@@ -17,7 +19,12 @@ export type ParticipantRow = {
   joined_at: string;
   last_seen_at: string;
   hidden_since: string | null;
-  love_language: string | null;
+  /**
+   * Constrained to LOVE_LANGUAGES by 0006. Typed as the union rather than
+   * `string` so a stray value has to be narrowed deliberately — this is the one
+   * client-writable field that reaches the model.
+   */
+  love_language: LoveLanguage | null;
 };
 
 /** Direction is 1 (rightward) or -1 (leftward). */

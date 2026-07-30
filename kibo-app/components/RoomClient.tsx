@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import Aquarium from '@/components/Aquarium';
+import LoveLanguagePicker from '@/components/LoveLanguagePicker';
+import NudgeBanner from '@/components/NudgeBanner';
 import NutrientMeter from '@/components/NutrientMeter';
 import TankControls from '@/components/TankControls';
 import { useAuth } from '@/components/AuthProvider';
@@ -40,6 +42,12 @@ export default function RoomClient({ code }: { code: string }) {
     seconds: number;
     coAwaySince: string | null;
   }>({ seconds: 0, coAwaySince: null });
+  // Both halves travel together: the text is what to say, the timestamp is the
+  // identity the banner dedupes on. One without the other cannot be rendered.
+  const [nudge, setNudge] = useState<{
+    text: string | null;
+    at: string | null;
+  }>({ text: null, at: null });
   const [channel, setChannel] = useState<RealtimeChannel | null>(null);
   const joinedRef = useRef(false);
 
@@ -113,19 +121,30 @@ export default function RoomClient({ code }: { code: string }) {
     const load = async () => {
       const { data } = await supabase
         .from('rooms')
-        .select('tank_mood, nutrient_seconds, co_away_since')
+        .select(
+          'tank_mood, nutrient_seconds, co_away_since, nudge_text, last_nudged_at'
+        )
         .eq('id', roomId)
         .single();
       if (!active || !data) return;
       const row = data as Pick<
         RoomRow,
-        'tank_mood' | 'nutrient_seconds' | 'co_away_since'
+        | 'tank_mood'
+        | 'nutrient_seconds'
+        | 'co_away_since'
+        | 'nudge_text'
+        | 'last_nudged_at'
       >;
       if (row.tank_mood) setMood(row.tank_mood);
       setNutrients({
         seconds: row.nutrient_seconds,
         coAwaySince: row.co_away_since,
       });
+      // This read is the nudge's entire delivery path until Web Push lands, and
+      // the reason it works is that the effect below also re-runs on
+      // visibilitychange: a cron job that writes at 04:00 has nobody watching,
+      // so "on next open" is literally when this fires.
+      setNudge({ text: row.nudge_text, at: row.last_nudged_at });
     };
 
     void load();
@@ -160,6 +179,7 @@ export default function RoomClient({ code }: { code: string }) {
       seconds: row.nutrient_seconds,
       coAwaySince: row.co_away_since,
     });
+    setNudge({ text: row.nudge_text, at: row.last_nudged_at });
   }, []);
 
   const leave = async () => {
@@ -217,6 +237,18 @@ export default function RoomClient({ code }: { code: string }) {
           </p>
         </div>
       )}
+
+      {roomId ? (
+        <NudgeBanner roomId={roomId} text={nudge.text} at={nudge.at} />
+      ) : null}
+
+      {roomId && supabase && userId ? (
+        <LoveLanguagePicker
+          supabase={supabase}
+          roomId={roomId}
+          userId={userId}
+        />
+      ) : null}
 
       {roomId && supabase && userId ? (
         <TankControls

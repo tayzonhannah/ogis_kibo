@@ -21,11 +21,20 @@ whether or not anyone says anything.
 | 2 | Canvas, presence, fish handoff | Built |
 | 3 | Send Warmth, emotional weather, memos | Built |
 | 4 | Phone-off continuity / nutrient score | Built |
-| 5 | AI nudges, PWA | Specced |
+| 5 | AI nudges, PWA | Built; verification pending migration `0006` |
 
 Phases 0–4 are verified against a live project: 37 REST checks
 (`scripts/verify-phase4.ps1`), 38 more for Phase 1, and 42 browser checks driving
 two real clients (`scripts/e2e-handoff.mjs`).
+
+Phase 5 builds clean, lints clean, and its route returns 401 on a missing, wrong,
+and malformed bearer token against a running server; the manifest, service worker,
+offline page and icons all serve. `scripts/verify-phase5.ps1` covers the rest and
+currently stops at its schema gate, because migration `0006` has not been applied
+to the live project yet — run it in the Supabase SQL editor, then the script.
+
+Web Push remains deferred (see *Deferred Increments*); the nudge is delivered as
+an in-app banner on next open.
 
 ## Quick start
 

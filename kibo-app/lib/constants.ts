@@ -72,6 +72,63 @@ export const TANK_MOOD_GRADIENT: Record<TankMood, [string, string]> = {
   warm: ['#3d2a1f', '#1a0f0a'],
 };
 
+/**
+ * Must match the room_participants.love_language check constraint (0006).
+ *
+ * This is a closed vocabulary rather than free text because the value is the
+ * only client-written field that reaches the model and comes back out on the
+ * *other* participant's screen. See the migration for the whole argument.
+ */
+export const LOVE_LANGUAGES = [
+  'words',
+  'time',
+  'touch',
+  'acts',
+  'symbols',
+] as const;
+export type LoveLanguage = (typeof LOVE_LANGUAGES)[number];
+
+export function isLoveLanguage(value: unknown): value is LoveLanguage {
+  return LOVE_LANGUAGES.includes(value as LoveLanguage);
+}
+
+/** Picker copy. Phrased as what you like receiving, not as a personality test. */
+export const LOVE_LANGUAGE_LABELS: Record<LoveLanguage, string> = {
+  words: 'A few words',
+  time: 'Time together',
+  touch: 'Warmth I can feel',
+  acts: 'Something done for me',
+  symbols: 'A small token',
+};
+
+/** Given to the model as the phrase to design a nudge around. */
+export const LOVE_LANGUAGE_HINTS: Record<LoveLanguage, string> = {
+  words: 'being told something kind',
+  time: 'unhurried shared presence',
+  touch: 'physical warmth and closeness',
+  acts: 'small practical gestures',
+  symbols: 'small tokens that mean something',
+};
+
+/**
+ * How long a nudge banner stays before fading on its own. Longer than the
+ * ambient gestures — this one is meant to be read, not glimpsed.
+ */
+export const NUDGE_BANNER_MS = 12_000;
+
+/** Quiet for this long and the room becomes a nudge candidate. Mirrors the cron route. */
+export const NUDGE_IDLE_DAYS = 3;
+
+/**
+ * Hard ceiling on rooms touched by one cron run. The model is billed per call,
+ * so an unbounded batch is an unbounded invoice; the route logs how many
+ * candidates it left behind rather than pretending it drained the queue.
+ */
+export const NUDGE_BATCH_LIMIT = 25;
+
+/** Matches the rooms.nudge_text check constraint (0006). */
+export const NUDGE_MAX_LEN = 200;
+
 export function normalizeCode(input: string): string {
   return input.trim().toUpperCase();
 }

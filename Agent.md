@@ -961,7 +961,9 @@ npm install @google/genai
 - **Verify the call shape before writing it.** Package (`@google/genai`) and model IDs above are current as of 2026-07, but the client surface has moved recently — the quickstart shows `ai.interactions.create({ model, input })`, whereas older tutorials use `models.generateContent`. Check [ai.google.dev/gemini-api/docs/quickstart](https://ai.google.dev/gemini-api/docs/quickstart) at implementation time rather than copying either from memory.
 - **Route:** `app/api/nudge/route.ts`, server-side only, using `lib/supabase/admin.ts`.
 - **Scheduling: Vercel Cron. Decided.** An API route does not fire on its own, and the two candidates were `vercel.json` cron or `pg_cron` + `pg_net`. Vercel Cron wins because it keeps `GEMINI_API_KEY` in exactly one place — the server env — whereas driving it from Postgres means the database also needs to hold or reach the key. It also lines up with the auth check below: Vercel sends `Authorization: Bearer $CRON_SECRET` automatically when that variable is set. **Verify both the header behaviour and the Hobby-plan limits on frequency and job count against current Vercel docs at implementation time** — same rule as the Gemini SDK above, for the same reason.
-- **Auth:** verify `Authorization: Bearer ${CRON_SECRET}` and return 401 otherwise. An unauthenticated route that calls a paid API is a billing vulnerability.
+- **Verified at implementation time (2026-07), as the bullet above requires.** `CRON_SECRET` is sent automatically as `Authorization: Bearer <value>` — confirmed. Hobby allows 100 jobs per project but **at most one run per day**, and a more frequent expression *fails deployment* rather than degrading; precision is the hour, so `0 4 * * *` fires somewhere in 04:00–04:59 UTC. Daily is ample against a 3-day window, so the Hobby limit costs nothing here. Two further facts changed the design: Vercel **never retries a failed invocation**, and delivery **can duplicate**. Together they say a missed run should simply wait for tomorrow, and a duplicate run must be harmless — see the claim below.
+- **Auth:** verify `Authorization: Bearer ${CRON_SECRET}` and return 401 otherwise. An unauthenticated route that calls a paid API is a billing vulnerability. Compared with `timingSafeEqual` after a length check, rather than `!==`; the docs' own example uses `!==`, and matching a secret byte-by-byte with early exit is a habit worth not having.
+- **Claim before you spend.** Idempotency is a compare-and-set, not a check-then-write: one `update ... set last_nudged_at = now(), nudge_text = null where id = ? and <the same idle predicate the scan used>`, returning the row. Whoever flips the timestamp first owns the room; a concurrent or duplicate invocation gets zero rows back and moves on. This is the row-level version of the lock Vercel's own docs recommend for overlapping runs, and it is why the idle window is re-tested inside the claim rather than trusted from the scan. Clearing `nudge_text` in the same statement matters: a generation failure after a successful claim would otherwise pair a fresh timestamp with a stale sentence, and the banner dedupes on the timestamp — so the client would replay an old nudge as new. A failed generation therefore burns the room's slot for one window, which is the correct direction to fail, because retrying immediately is how a broken prompt becomes an invoice.
 - **Trigger:** rooms where `last_interaction_at < now() - interval '3 days'` **and** (`last_nudged_at` is null or older than the same window).
 - **Idempotency:** set `last_nudged_at = now()` in the same transaction that sends. Cron delivery is at-least-once, so without this a retry double-nudges.
 - **Prompt context:** pass both participants' `love_language` plus the current `tank_mood`, and ask for one short notification line (e.g. "Drop a small memo?"). Cap the output token limit low — the output is one sentence, and the cap is a hard spend ceiling.
@@ -969,17 +971,39 @@ npm install @google/genai
 
 **Love language capture:** `room_participants.love_language` exists in the schema but nothing populates it. Add a one-time prompt after a participant's first join — a four-or-five-option picker, skippable. The nudge prompt must handle nulls, since it will often have one participant's answer and not the other's, or neither.
 
+The column grant (`grant update (love_language) on public.room_participants`) and the `self update participant` policy already permit exactly this write and nothing wider, so the picker needs no *access* migration. It is awaited rather than sent through `fire()`, because the card dismisses on success — the result is genuinely needed, which makes this the case `fire()`'s doc comment excludes. It still gets a read-back assertion, since the stored value's only reader is a job that runs three days later.
+
+**The column did need constraining, though.** 0001 created `love_language` as bare `text` with a client update grant, which was harmless while nothing read it. Phase 5 makes it the only client-written value that reaches a language model and comes back out on the *other* participant's screen — a prompt-injection channel between two people who are supposed to be exchanging fish. 0006 adds a check constraint over a closed vocabulary (mirrored as `LOVE_LANGUAGES` in `lib/constants.ts`, the same arrangement as `tank_mood`), and the route validates against the same list before building the prompt. Neither alone is enough: a constraint added later cannot clean rows written before it, and a client-side allowlist is not access control.
+
+### Delivery: where a nudge actually lands
+
+The draft generated a sentence and had nowhere to put it. `rooms` carried `last_nudged_at` — a timestamp — and no column for the text, so with push deferred the cron job would have paid Gemini per room and discarded the result. Two ways out, and the cheap one is wrong:
+
+- **Generate the line on page open instead.** Rejected. It moves a paid API call onto a user-triggered path, where spend scales with traffic rather than with a once-daily job, and it contradicts the scheduling decision above.
+- **Store it.** `0006` adds `rooms.nudge_text`, written only by the route holding the service-role key. It gets **no** `grant update`, for the same reason `nutrient_seconds` has none: a client that can write its own nudge can forge one.
+
+Dismissal is deliberately local. The client cannot write `nudge_text` — that is the point of withholding the grant — so "seen" lives in `localStorage` as the `last_nudged_at` value the banner was last shown for, and a nudge is new when the server's timestamp differs from the stored one. This keeps the ledger server-owned without inventing a second write path, and the failure mode is a banner reappearing on a cleared browser, which is survivable. `grant select on public.rooms` is whole-row, so no read grant changes either.
+
+This is the standing constraint about broadcast applied one layer up: a nudge is a state change that must survive a refresh, so it lives in a column, not in a channel.
+
 ### 2. PWA
 
 - **Manifest:** `app/manifest.ts` with `display: 'standalone'`, icons, and theme colour matching the tank.
-- **Service worker:** cache the shell only. Keep the aquarium online-only — a cached stale tank is worse than an honest offline state.
+- **Icons are a real dependency, not a detail.** The repo ships only `app/favicon.ico`. Chrome will not treat the app as installable without 192px and 512px PNGs, and Android crops a non-maskable icon into a circle, so a square logo loses its edges. Needs 192, 512, and a 512 maskable with the artwork inside the safe zone (~80% of the canvas). Generated from one source shape by `scripts/gen-icons.mjs` so the set can be regenerated rather than hand-maintained.
+- **Service worker:** cache the shell only. Keep the aquarium online-only — a cached stale tank is worse than an honest offline state. A `fetch` handler is not optional even so: installability requires one. Network-first for navigation with a static `/offline` fallback satisfies that without ever serving a stale tank.
 - **Push notifications:** a bigger lift than the draft implies. Web Push needs VAPID keys, a `web-push` server dependency, a `PushSubscription` stored per participant, and explicit permission. On iOS, Web Push works **only** when the PWA has been added to the Home Screen, and permission must be requested from a user gesture. Budget this as its own increment; if it slips, the nudge degrades to an in-app banner on next open.
 
 ### Phase 5 verification
 
+`scripts/verify-phase5.ps1` covers the route and the grants over REST. It backdates `last_interaction_at` with the service role, so it skips itself loudly without `SUPABASE_SERVICE_ROLE_KEY` — same shape as the Phase 4 cap check.
+
 - `curl` to `/api/nudge` without the secret returns 401.
 - With the secret, a room idle >3 days produces exactly one nudge; calling twice in a row produces no second nudge.
 - A room with one or both `love_language` values null still produces a sensible nudge.
+- An *active* room is not nudged — the trigger window has to be able to exclude.
+- **`nudge_text` and `last_nudged_at` are read back after the call.** The route's whole observable output is that write; without reading it, a 200 from a route that generated nothing looks identical to success.
+- **A direct client `update rooms set nudge_text = '...'` fails on column privileges**, and so does writing `last_nudged_at`. A forgeable nudge is a stranger's notification.
+- A participant can write their own `love_language` and **not** their partner's.
 - Lighthouse reports the app as installable; it launches standalone on Android and iOS.
 - No `GEMINI_API_KEY` or service-role key appears in any client bundle (`grep` the `.next` output).
 
