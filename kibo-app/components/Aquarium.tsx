@@ -34,6 +34,19 @@ import type {
  * persisted — a fish always enters at the edge it crossed into, so only the
  * vertical fraction and speed have to travel.
  */
+export const FISH_TOPIC_PROMPTS = [
+  'Favorite book?',
+  'What made you smile today?',
+  'Coffee or tea person?',
+  'Where is your happy place?',
+  'What are you listening to right now?',
+  'What is 1 thing you are grateful for?',
+  'If you could travel anywhere tomorrow?',
+  'Go-to comfort food?',
+  'Any fun plans this weekend?',
+  'Best part of your week?',
+];
+
 type LocalFish = {
   id: string;
   ownerId?: string | null;
@@ -51,6 +64,7 @@ type LocalFish = {
   sweepFreq: number;
   sweepAmp: number;
   finPhase: number;
+  topicPrompt?: string;
   /** True between "exited the screen" and "the holder write came back". */
   handingOff: boolean;
 };
@@ -375,6 +389,42 @@ function drawFish(
   ctx.fillStyle = '#ffffff';
   ctx.fill();
 
+  // ------------------------------------------------ 6. Speech Bubble Topic Prompt
+  if (fish.topicPrompt) {
+    ctx.save();
+    ctx.scale(fish.direction, 1);
+    ctx.font = '500 11px system-ui, sans-serif';
+    const textW = ctx.measureText(fish.topicPrompt).width;
+    const bw = Math.max(65, textW + 16);
+    const bh = 22;
+    const bx = -bw / 2;
+    const by = -18 - bh;
+
+    // Glassmorphic speech bubble container
+    ctx.fillStyle = 'rgba(8, 26, 38, 0.85)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 11);
+    ctx.fill();
+    ctx.stroke();
+
+    // Speech bubble tail
+    ctx.beginPath();
+    ctx.moveTo(-4, by + bh);
+    ctx.lineTo(0, by + bh + 4);
+    ctx.lineTo(4, by + bh);
+    ctx.fillStyle = 'rgba(8, 26, 38, 0.85)';
+    ctx.fill();
+
+    // Prompt text
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(fish.topicPrompt, 0, by + bh / 2 + 0.5);
+    ctx.restore();
+  }
+
   ctx.restore();
 }
 
@@ -606,6 +656,9 @@ export default function Aquarium({
       const rawY = fish.y_frac ?? fish.yFrac ?? 0.45;
       const yFrac = Math.max(0.12, Math.min(0.88, rawY));
 
+      const promptIndex = Math.floor(hashUnit(id, 23) * FISH_TOPIC_PROMPTS.length);
+      const topicPrompt = FISH_TOPIC_PROMPTS[promptIndex];
+
       fishRef.current.push({
         id,
         ownerId: fish.owner_id ?? null,
@@ -623,6 +676,7 @@ export default function Aquarium({
         sweepFreq: 3.8 + hashUnit(id, 14) * 2.2,
         sweepAmp: 3.0 + hashUnit(id, 15) * 2.5,
         finPhase: hashUnit(id, 16) * 6.283,
+        topicPrompt,
         handingOff: false,
       });
       syncFishCount();
