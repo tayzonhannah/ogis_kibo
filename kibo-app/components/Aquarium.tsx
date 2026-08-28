@@ -36,12 +36,21 @@ import type {
  */
 type LocalFish = {
   id: string;
+  ownerId?: string | null;
   x: number;
   yFrac: number;
   speedPxS: number;
   direction: FishDirection;
   color: string;
+  finStyle: string;
+  scale: number;
   bobPhase: number;
+  bobFreq: number;
+  bobAmp: number;
+  sweepPhase: number;
+  sweepFreq: number;
+  sweepAmp: number;
+  finPhase: number;
   /** True between "exited the screen" and "the holder write came back". */
   handingOff: boolean;
 };
@@ -102,8 +111,6 @@ function hashUnit(id: string, salt = 0): number {
   return ((h >>> 0) % 10000) / 10000;
 }
 
-const bobPhaseFor = (id: string) => hashUnit(id, 7) * 6.283;
-
 /** Eased 0->1->0 envelope: fade in, hold, fade out. */
 function envelope(age: number, life: number, fadeIn = 0.15, fadeOut = 0.3) {
   const t = age / life;
@@ -148,38 +155,224 @@ function roundRect(
   ctx.closePath();
 }
 
+/** Normalizes diverse fin style identifiers onto the 5 procedural morphology engines. */
+function normalizeFinStyle(
+  style?: string
+): 'classic' | 'fan' | 'veil' | 'beta' | 'streamline' {
+  if (!style) return 'classic';
+  const s = style.toLowerCase().trim();
+  if (s.includes('fan') || s.includes('butterfly')) return 'fan';
+  if (s.includes('veil')) return 'veil';
+  if (s.includes('beta') || s.includes('plakat') || s.includes('dragon')) return 'beta';
+  if (
+    s.includes('streamline') ||
+    s.includes('ribbon') ||
+    s.includes('spiky') ||
+    s.includes('crown')
+  ) {
+    return 'streamline';
+  }
+  return 'classic';
+}
+
+/**
+ * Procedural Fish Rendering Engine.
+ * Renders distinct morphology parameterized by participant identity:
+ * custom fin shapes (classic/beta/streamline/veil/fan), scale sizing,
+ * layered gradients, eye specular highlights, and independent bob/sweep physics.
+ */
 function drawFish(
   ctx: CanvasRenderingContext2D,
   fish: LocalFish,
   height: number,
   seconds: number
 ) {
-  const bob = Math.sin(seconds * 1.1 + fish.bobPhase) * 5;
+  const bob = Math.sin(seconds * fish.bobFreq + fish.bobPhase) * fish.bobAmp;
   const y = fish.yFrac * height + bob;
+  const sweep = Math.sin(seconds * fish.sweepFreq + fish.sweepPhase) * fish.sweepAmp;
+  const finFlutter = Math.sin(seconds * 4.2 + fish.finPhase) * 2.2;
+  const style = normalizeFinStyle(fish.finStyle);
 
   ctx.save();
   ctx.translate(fish.x, y);
-  ctx.scale(fish.direction, 1);
+  ctx.scale(fish.direction * fish.scale, fish.scale);
 
-  const sweep = Math.sin(seconds * 5 + fish.bobPhase) * 4;
-  ctx.beginPath();
-  ctx.moveTo(-16, 0);
-  ctx.lineTo(-30, -9 + sweep);
-  ctx.lineTo(-30, 9 + sweep);
-  ctx.closePath();
+  // ------------------------------------------------------------- 1. Tail Fins
   ctx.fillStyle = fish.color;
-  ctx.globalAlpha = 0.75;
-  ctx.fill();
 
+  if (style === 'veil') {
+    // Flowing translucent gossamer veil tail with multiple undulating lobes
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.moveTo(-16, 0);
+    ctx.bezierCurveTo(-26, -10, -44, -28 + sweep * 1.3, -56, -18 + sweep * 1.7);
+    ctx.bezierCurveTo(-46, sweep * 0.8, -52, 18 + sweep * 1.5, -34, 12 + sweep * 0.8);
+    ctx.bezierCurveTo(-24, 6, -18, 2, -16, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    // Inner veil layer for depth
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    ctx.moveTo(-16, 0);
+    ctx.bezierCurveTo(-24, -6, -38, -16 + sweep * 1.1, -44, -8 + sweep * 1.4);
+    ctx.bezierCurveTo(-36, sweep * 0.6, -40, 10 + sweep * 1.2, -26, 6 + sweep * 0.5);
+    ctx.closePath();
+    ctx.fill();
+  } else if (style === 'fan') {
+    // Broad scalloped butterfly fan tail with delicate ray lines
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    ctx.moveTo(-16, 0);
+    ctx.bezierCurveTo(-24, -12, -36, -24 + sweep, -42, -14 + sweep);
+    ctx.bezierCurveTo(-38, -4 + sweep, -42, 4 + sweep, -42, 14 + sweep);
+    ctx.bezierCurveTo(-36, 24 + sweep, -24, 12, -16, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    // Radiating fin rays
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.lineWidth = 1;
+    for (let r = -2; r <= 2; r += 1) {
+      ctx.beginPath();
+      ctx.moveTo(-16, 0);
+      ctx.quadraticCurveTo(
+        -28,
+        r * 6 + sweep * 0.5,
+        -40,
+        r * 8 + sweep * 0.9
+      );
+      ctx.stroke();
+    }
+  } else if (style === 'beta') {
+    // Flamboyant half-moon crown tail with bold flared lobes
+    ctx.globalAlpha = 0.82;
+    ctx.beginPath();
+    ctx.moveTo(-16, -4);
+    ctx.bezierCurveTo(-26, -16, -38, -22 + sweep, -44, -10 + sweep);
+    ctx.lineTo(-40, sweep * 0.4);
+    ctx.lineTo(-44, 10 + sweep);
+    ctx.bezierCurveTo(-38, 22 + sweep, -26, 16, -16, 4);
+    ctx.closePath();
+    ctx.fill();
+  } else if (style === 'streamline') {
+    // Sleek swallow-tail racing prongs
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(-16, 0);
+    ctx.lineTo(-38, -18 + sweep * 1.2);
+    ctx.lineTo(-26, -4 + sweep * 0.5);
+    ctx.lineTo(-20, sweep * 0.3);
+    ctx.lineTo(-26, 4 + sweep * 0.5);
+    ctx.lineTo(-38, 18 + sweep * 1.2);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    // Classic / Standard dual-lobe tail
+    ctx.globalAlpha = 0.78;
+    ctx.beginPath();
+    ctx.moveTo(-16, 0);
+    ctx.bezierCurveTo(-22, -8, -32, -15 + sweep, -34, -10 + sweep);
+    ctx.bezierCurveTo(-26, sweep * 0.4, -26, sweep * 0.4, -34, 10 + sweep);
+    ctx.bezierCurveTo(-32, 15 + sweep, -22, 8, -16, 0);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // ----------------------------------------------------------- 2. Dorsal Fins
+  ctx.fillStyle = fish.color;
+  if (style === 'veil') {
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(-2, -10);
+    ctx.bezierCurveTo(-8, -20, -22, -22 + sweep * 0.8, -28, -14 + sweep * 0.6);
+    ctx.quadraticCurveTo(-18, -8, -14, -6);
+    ctx.closePath();
+    ctx.fill();
+  } else if (style === 'beta') {
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    ctx.moveTo(2, -10);
+    ctx.lineTo(-6, -22);
+    ctx.lineTo(-12, -24);
+    ctx.lineTo(-16, -18);
+    ctx.lineTo(-18, -6);
+    ctx.closePath();
+    ctx.fill();
+  } else if (style === 'fan') {
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(0, -10);
+    ctx.bezierCurveTo(-6, -20, -14, -22, -18, -6);
+    ctx.closePath();
+    ctx.fill();
+  } else if (style === 'streamline') {
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    ctx.moveTo(2, -10);
+    ctx.lineTo(-12, -17);
+    ctx.lineTo(-14, -7);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(-2, -10);
+    ctx.quadraticCurveTo(-10, -19, -16, -7);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // ------------------------------------------------------------- 3. Fish Body
   ctx.globalAlpha = 1;
   ctx.beginPath();
-  ctx.ellipse(0, 0, 20, 10, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, 21, 10.5, 0, 0, Math.PI * 2);
   ctx.fillStyle = fish.color;
   ctx.fill();
 
+  // Pearlescent belly / back shading gradient
+  const bodyGrad = ctx.createLinearGradient(0, -11, 0, 11);
+  bodyGrad.addColorStop(0, 'rgba(255, 255, 255, 0.28)');
+  bodyGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0)');
+  bodyGrad.addColorStop(1, 'rgba(0, 0, 0, 0.24)');
+  ctx.fillStyle = bodyGrad;
+  ctx.fill();
+
+  // Subtle gill contour
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.arc(10, -2.5, 1.9, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(8, 26, 38, 0.85)';
+  ctx.arc(6, 0, 6, -Math.PI * 0.45, Math.PI * 0.45);
+  ctx.stroke();
+
+  // --------------------------------------------------------- 4. Pectoral Fin
+  ctx.fillStyle = fish.color;
+  ctx.globalAlpha = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(2, 3);
+  ctx.quadraticCurveTo(-4, 12 + finFlutter, -8, 8 + finFlutter);
+  ctx.quadraticCurveTo(-2, 5, 2, 3);
+  ctx.closePath();
+  ctx.fill();
+
+  // ----------------------------------------------------------------- 5. Eye
+  // White sclera
+  ctx.globalAlpha = 0.95;
+  ctx.beginPath();
+  ctx.arc(11, -2.5, 2.7, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+
+  // Dark pupil
+  ctx.beginPath();
+  ctx.arc(11.4, -2.5, 1.8, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(8, 26, 38, 0.95)';
+  ctx.fill();
+
+  // Specular catchlight
+  ctx.beginPath();
+  ctx.arc(12.2, -3.2, 0.7, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
   ctx.fill();
 
   ctx.restore();
@@ -380,10 +573,6 @@ export default function Aquarium({
    * A fish in flight has already stopped being rendered here but stays in the
    * array until its holder write is confirmed, so counting it would claim the
    * fish is on two screens at once during that window.
-   *
-   * Called at every mutation point rather than from the render loop, because a
-   * backgrounded tab still adopts fish (realtime callbacks keep firing) even
-   * though requestAnimationFrame is paused.
    */
   const syncFishCount = useCallback(() => {
     setFishCount(fishRef.current.filter((fish) => !fish.handingOff).length);
@@ -396,26 +585,44 @@ export default function Aquarium({
 
     const adopt = (fish: {
       id: string;
-      y_frac: number;
-      speed_px_s: number;
+      y_frac?: number;
+      yFrac?: number;
+      speed_px_s?: number;
+      speed?: number;
       direction: FishDirection;
       color: string;
+      fin_style?: string;
+      finStyle?: string;
+      owner_id?: string | null;
     }) => {
-      // Dedupe across broadcast / postgres_changes / recovery. adopt() pushes
-      // synchronously and JS is single-threaded, so whichever signal lands
-      // first always wins and the others see it here.
+      // Dedupe across broadcast / postgres_changes / recovery.
       if (fishRef.current.some((existing) => existing.id === fish.id)) return;
       pendingRemovalRef.current.delete(fish.id);
 
       const width = canvasRef.current?.clientWidth ?? 0;
+      const id = fish.id;
+      const finStyle = fish.fin_style ?? fish.finStyle ?? 'classic';
+      const speedPxS = fish.speed_px_s ?? fish.speed ?? 48;
+      const rawY = fish.y_frac ?? fish.yFrac ?? 0.45;
+      const yFrac = Math.max(0.12, Math.min(0.88, rawY));
+
       fishRef.current.push({
-        id: fish.id,
+        id,
+        ownerId: fish.owner_id ?? null,
         x: fish.direction === 1 ? -FISH_MARGIN : width + FISH_MARGIN,
-        yFrac: fish.y_frac,
-        speedPxS: fish.speed_px_s,
+        yFrac,
+        speedPxS,
         direction: fish.direction,
         color: fish.color,
-        bobPhase: bobPhaseFor(fish.id),
+        finStyle,
+        scale: 0.88 + hashUnit(id, 11) * 0.24, // 0.88 - 1.12 scale
+        bobPhase: hashUnit(id, 7) * 6.283,
+        bobFreq: 0.95 + hashUnit(id, 12) * 0.45,
+        bobAmp: 3.5 + hashUnit(id, 13) * 3.0,
+        sweepPhase: hashUnit(id, 8) * 6.283,
+        sweepFreq: 3.8 + hashUnit(id, 14) * 2.2,
+        sweepAmp: 3.0 + hashUnit(id, 15) * 2.5,
+        finPhase: hashUnit(id, 16) * 6.283,
         handingOff: false,
       });
       syncFishCount();
@@ -480,14 +687,18 @@ export default function Aquarium({
       const rows = (data as Pick<MemoRow, 'id' | 'body' | 'created_at'>[]) ?? [];
       // Oldest first, so the newest ends up nearest the bottom.
       [...rows].reverse().forEach((m) => {
-        addBubble(m.id, m.body, 0.25 + hashUnit(m.id) * 0.5, 0.55 + hashUnit(m.id, 1) * 0.3);
+        addBubble(
+          m.id,
+          m.body,
+          0.25 + hashUnit(m.id) * 0.5,
+          0.55 + hashUnit(m.id, 1) * 0.3
+        );
       });
     };
 
     /**
-     * Presence says we are alone, so any fish still assigned to the absent
-     * partner would be stranded — nobody is simulating it. Claim the room.
-     * Debounced, because a momentary websocket blip also empties presence.
+     * Presence says we are alone, so any fish still assigned to an absent
+     * member would be stranded — nobody is simulating it. Claim the room.
      */
     const claimStranded = async () => {
       if (peersRef.current.length > 0) return;
@@ -500,8 +711,7 @@ export default function Aquarium({
     };
 
     const channel = supabase.channel(`room:${roomId}`, {
-      // self: true so a sender also sees its own warmth / memo / heart. The
-      // FISH_CROSS handler filters on toUser, so it is unaffected.
+      // self: true so a sender also sees its own warmth / memo / heart.
       config: { presence: { key: userId }, broadcast: { self: true } },
     });
     channelRef.current = channel;
@@ -524,14 +734,19 @@ export default function Aquarium({
         }
       })
       .on('broadcast', { event: 'FISH_CROSS' }, ({ payload }) => {
-        const crossing = payload as FishCrossPayload;
+        const crossing = payload as FishCrossPayload & {
+          yFrac?: number;
+          speed?: number;
+          fin_style?: string;
+        };
         if (crossing.toUser !== userId) return;
         adopt({
           id: crossing.fishId,
-          y_frac: crossing.y_frac,
-          speed_px_s: crossing.speed_px_s,
+          y_frac: crossing.y_frac ?? crossing.yFrac,
+          speed_px_s: crossing.speed_px_s ?? crossing.speed,
           direction: crossing.direction,
           color: crossing.color,
+          fin_style: crossing.finStyle ?? crossing.fin_style,
         });
       })
       .on('broadcast', { event: 'WARMTH_SENT' }, ({ payload }) => {
@@ -547,10 +762,6 @@ export default function Aquarium({
         addHeart(heart.id, heart.xFrac, heart.yFrac);
       })
       .on('broadcast', { event: 'MEMO_RETRACTED' }, ({ payload }) => {
-        // The only live path for a retraction: the soft-deleted row stops
-        // satisfying the memos SELECT policy, so postgres_changes cannot carry
-        // it. See MemoRetractedPayload. Self-delivery is harmless — the sender
-        // has already removed it.
         const { id } = payload as MemoRetractedPayload;
         bubblesRef.current = bubblesRef.current.filter((b) => b.id !== id);
       })
@@ -568,9 +779,7 @@ export default function Aquarium({
             adopt(row);
             return;
           }
-          // Postgres is authoritative in both directions: if a fish is no
-          // longer ours, stop drawing it. Without this, a claim by the other
-          // side would leave the same fish rendered on both screens.
+          // Postgres is authoritative: if fish is no longer ours, stop drawing it.
           if (fishRef.current.some((fish) => fish.id === row.id)) {
             pendingRemovalRef.current.add(row.id);
           }
@@ -597,7 +806,6 @@ export default function Aquarium({
           filter: `room_id=eq.${roomId}`,
         },
         (payload) => {
-          // Safety net for a dropped MEMO_SENT broadcast, same split as fish.
           const row = payload.new as MemoRow;
           addBubble(
             row.id,
@@ -645,8 +853,6 @@ export default function Aquarium({
       if (width === 0 || height === 0) return;
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
-      // setTransform rather than scale: resize fires repeatedly and scale
-      // would compound.
       canvas.getContext('2d')?.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
@@ -657,11 +863,6 @@ export default function Aquarium({
   }, []);
 
   // ------------------------------- tap a memo for a heart, hold to retract it
-  //
-  // One pointer, two gestures, resolved by duration. Tap fires on pointerup so
-  // that a press which becomes a hold does not also send a heart, and a drag
-  // across the tank sends neither.
-
   const clearPress = useCallback(() => {
     const press = pressRef.current;
     if (press) clearTimeout(press.timer);
@@ -670,17 +871,13 @@ export default function Aquarium({
 
   const retract = useCallback(
     async (memoId: string) => {
-      // Awaited, not fired: the bubble should only disappear once the row really
-      // is retracted. Retraction goes through the RPC because a client UPDATE
-      // cannot soft-delete a row the SELECT policy then hides — see migration
-      // 0004.
       const { error } = await supabase.rpc('retract_memo', {
         target_memo: memoId,
       });
 
       if (error) {
         console.warn(`[kibo] retract_memo failed: ${error.message}`);
-        pressRef.current = null; // lets the bubble fade back in
+        pressRef.current = null;
         return;
       }
 
@@ -705,19 +902,20 @@ export default function Aquarium({
       const px = event.clientX - rect.left;
       const py = event.clientY - rect.top;
 
-      // Topmost (most recently added) bubble wins.
       for (let i = bubblesRef.current.length - 1; i >= 0; i -= 1) {
         const b = bubblesRef.current[i];
         const hit = b.hit;
         if (!hit) continue;
-        if (px >= hit.x && px <= hit.x + hit.w && py >= hit.y && py <= hit.y + hit.h) {
-          // Keep receiving move/up even if the finger slides off the bubble, or
-          // off the canvas entirely. Bubbles drift while you hold one.
+        if (
+          px >= hit.x &&
+          px <= hit.x + hit.w &&
+          py >= hit.y &&
+          py <= hit.y + hit.h
+        ) {
           try {
             canvas.setPointerCapture(event.pointerId);
           } catch {
-            // Not fatal: without capture the gesture still works as long as the
-            // pointer stays over the canvas, which fills the viewport.
+            // Best effort capture
           }
           const id = b.id;
           pressRef.current = {
@@ -754,7 +952,6 @@ export default function Aquarium({
   const handlePointerUp = useCallback(() => {
     const press = pressRef.current;
     if (!press) return;
-    // The hold already fired; releasing must not also send a heart.
     if (press.fired) return;
 
     const bubble = bubblesRef.current.find((b) => b.id === press.bubbleId);
@@ -789,13 +986,11 @@ export default function Aquarium({
     let lastFxAt = 0;
 
     /**
-     * Two-phase handoff. The fish is held locally, not removed, until the
-     * `holder` write lands — so a failed write turns the fish around instead
-     * of dropping it into nowhere.
+     * Two-phase handoff with multi-client ring topology routing.
+     * The fish is held locally until the `holder` write lands in Supabase.
      */
     const handOff = async (fish: LocalFish, peer: string) => {
       fish.handingOff = true;
-      // We have stopped drawing it as of now, so stop counting it as of now.
       syncFishCount();
 
       const payload: FishCrossPayload = {
@@ -804,9 +999,12 @@ export default function Aquarium({
         speed_px_s: fish.speedPxS,
         direction: fish.direction,
         color: fish.color,
+        finStyle: fish.finStyle,
+        fromUser: userId,
         toUser: peer,
       };
-      // Fast path. Lossy by design; the write below is the truth.
+
+      // Fast path broadcast
       void channelRef.current?.send({
         type: 'broadcast',
         event: 'FISH_CROSS',
@@ -823,7 +1021,7 @@ export default function Aquarium({
         .eq('id', fish.id);
 
       if (error) {
-        // Keep the fish, turn it around, try again on the next lap.
+        // Keep the fish, turn it around on failed transfer
         fish.handingOff = false;
         fish.direction = (fish.direction * -1) as FishDirection;
         syncFishCount();
@@ -849,7 +1047,6 @@ export default function Aquarium({
     };
 
     const frame = (now: number) => {
-      // Clamp so a backgrounded tab doesn't teleport every fish on return.
       const dt = Math.min((now - last) / 1000, 0.1);
       last = now;
       const seconds = (now - start) / 1000;
@@ -866,6 +1063,45 @@ export default function Aquarium({
         drawCoral(ctx, coral, width, height, now, seconds);
       }
 
+      // ------------------------------------ Boid-lite spatial separation
+      // Smoothly steer swimming fish away from neighbors to avoid overlap
+      const activeFish = fishRef.current.filter((f) => !f.handingOff);
+      const SEPARATION_DIST_X = 90;
+      const SEPARATION_DIST_Y = 55;
+
+      for (let i = 0; i < activeFish.length; i += 1) {
+        const f1 = activeFish[i];
+        let repulseY = 0;
+
+        for (let j = 0; j < activeFish.length; j += 1) {
+          if (i === j) continue;
+          const f2 = activeFish[j];
+
+          const dx = f1.x - f2.x;
+          const dyPx = (f1.yFrac - f2.yFrac) * height;
+
+          const normDistSq =
+            (dx * dx) / (SEPARATION_DIST_X * SEPARATION_DIST_X) +
+            (dyPx * dyPx) / (SEPARATION_DIST_Y * SEPARATION_DIST_Y);
+
+          if (normDistSq < 1.0 && normDistSq > 0.0001) {
+            const force = 1.0 - Math.sqrt(normDistSq);
+            const safeDirY = dyPx >= 0 ? (dyPx === 0 ? (i < j ? 1 : -1) : 1) : -1;
+            repulseY += (safeDirY * force * 35) / height;
+
+            if (f1.direction === f2.direction && Math.abs(dx) < 60) {
+              if (f1.x > f2.x && f1.direction === 1) f1.x += 12 * dt;
+              else if (f1.x < f2.x && f1.direction === -1) f1.x -= 12 * dt;
+            }
+          }
+        }
+
+        if (repulseY !== 0) {
+          f1.yFrac = Math.max(0.12, Math.min(0.88, f1.yFrac + repulseY * dt));
+        }
+      }
+
+      // ---------------------------------------------- Advance & Render Fish
       const pending = pendingRemovalRef.current;
       let removed = false;
 
@@ -875,8 +1111,7 @@ export default function Aquarium({
           removed = true;
           return false;
         }
-        // In flight: hold it, but don't advance or draw it. This is also what
-        // prevents a second handoff while the first write is outstanding.
+
         if (fish.handingOff) return true;
 
         fish.x += fish.speedPxS * fish.direction * dt;
@@ -886,13 +1121,30 @@ export default function Aquarium({
         const exitedLeft = fish.direction === -1 && fish.x < -FISH_MARGIN;
         if (!exitedRight && !exitedLeft) return true;
 
-        const peer = peersRef.current[0];
-        if (!peer) {
-          // Nobody to receive it — reflect rather than lose the fish.
+        const peers = peersRef.current;
+        if (peers.length === 0) {
+          // Solo participant: reflect locally within canvas bounds
           fish.direction = (fish.direction * -1) as FishDirection;
           return true;
         }
-        void handOff(fish, peer);
+
+        // Multi-peer ring routing:
+        // Order all active participants consistently to form deterministic ring topology
+        const allMembers = [userId, ...peers].sort();
+        const myIdx = allMembers.indexOf(userId);
+        const nextIdx =
+          fish.direction === 1
+            ? (myIdx + 1) % allMembers.length
+            : (myIdx - 1 + allMembers.length) % allMembers.length;
+
+        const targetPeer = allMembers[nextIdx];
+
+        if (targetPeer === userId || !targetPeer) {
+          fish.direction = (fish.direction * -1) as FishDirection;
+          return true;
+        }
+
+        void handOff(fish, targetPeer);
         return true;
       });
 
@@ -967,8 +1219,6 @@ export default function Aquarium({
             : `Shared aquarium. ${fishCount} fish on this screen.`
         }
       />
-      {/* Deliberately not aria-live: fish cross every few seconds, and a live
-          region would turn that into constant screen-reader chatter. */}
     </>
   );
 }

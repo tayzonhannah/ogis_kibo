@@ -1,12 +1,38 @@
 import type { LoveLanguage, TankMood } from './constants';
+<<<<<<< Updated upstream
+=======
+
+export type UserProfile = {
+  id: string;
+  email?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  fishPoints: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type ProfileRow = {
+  id: string;
+  email: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
+  fish_points: number;
+  created_at: string;
+  updated_at: string;
+};
+>>>>>>> Stashed changes
 
 export type RoomRow = {
   id: string;
   code: string;
+  name: string;
   created_at: string;
+  created_by: string | null;
   tank_mood: TankMood;
   nutrient_seconds: number;
   co_away_since: string | null;
+  active_away_count?: number;
   last_interaction_at: string;
   last_nudged_at: string | null;
   /** Written only by app/api/nudge — no client update grant. See 0006. */
@@ -25,6 +51,10 @@ export type ParticipantRow = {
    * client-writable field that reaches the model.
    */
   love_language: LoveLanguage | null;
+<<<<<<< Updated upstream
+=======
+  profile?: UserProfile;
+>>>>>>> Stashed changes
 };
 
 /** Direction is 1 (rightward) or -1 (leftward). */
@@ -34,10 +64,12 @@ export type FishRow = {
   id: string;
   room_id: string;
   holder: string | null;
+  owner_id?: string | null;
   y_frac: number;
   speed_px_s: number;
   direction: FishDirection;
   color: string;
+  fin_style?: string;
   updated_at: string;
 };
 
@@ -48,6 +80,65 @@ export type MemoRow = {
   body: string;
   created_at: string;
   deleted_at: string | null;
+};
+
+export type TimeCapsuleRow = {
+  id: string;
+  room_id: string;
+  created_by: string;
+  title: string;
+  memory_text: string;
+  media_url: string | null;
+  unlock_at: string;
+  unlocked: boolean;
+  created_at: string;
+};
+
+export type VoucherCategory =
+  | 'coffee'
+  | 'dining'
+  | 'wellness'
+  | 'culture'
+  | 'retail'
+  | 'general';
+
+export type VoucherRow = {
+  id: string;
+  partner_name: string;
+  title: string;
+  description: string;
+  points_cost: number;
+  discount_code: string;
+  category: VoucherCategory;
+  image_url?: string | null;
+  is_active: boolean;
+  created_at: string;
+};
+
+export type VoucherRedemptionRow = {
+  id: string;
+  user_id: string;
+  voucher_id: string;
+  points_spent: number;
+  redeemed_at: string;
+  voucher?: VoucherRow;
+};
+
+export type CreateRoomResult = {
+  room_id: string;
+  room_code: string;
+};
+
+export type TankSummary = {
+  id: string;
+  code: string;
+  name: string;
+  tank_mood: TankMood;
+  member_count: number;
+  nutrient_seconds: number;
+  co_away_since: string | null;
+  last_interaction_at: string;
+  created_by: string | null;
 };
 
 /**
@@ -61,6 +152,8 @@ export type FishCrossPayload = {
   speed_px_s: number;
   direction: FishDirection;
   color: string;
+  finStyle?: string;
+  fromUser?: string;
   toUser: string;
 };
 
@@ -112,10 +205,6 @@ export type HeartPayload = { id: string; xFrac: number; yFrac: number };
  * satisfies the policy the subscription reads through, and realtime does not
  * deliver it. Unlike the fish and memo paths, there is no truth-path fallback
  * available here, so this broadcast is the only live delivery.
- *
- * That is acceptable because a missed one self-heals rather than desyncing: the
- * bubble expires on its own within MEMO_LIFETIME_MS, and the backlog query on
- * next load already filters retracted memos out. The row is gone either way.
  */
 export type MemoRetractedPayload = { id: string };
 
@@ -148,12 +237,50 @@ export function joinStatusToError(status: string | undefined): RoomError {
 }
 
 export const ROOM_ERROR_COPY: Record<RoomError, string> = {
-  room_not_found: "No tank with that code. Check the characters and try again.",
-  room_full: 'That tank already has two people in it.',
+  room_not_found: 'No tank with that code. Check the characters and try again.',
+  room_full: 'That tank has reached its maximum capacity of 5 members.',
   too_many_attempts: 'Too many tries. Wait a few minutes before trying again.',
-  not_authenticated: 'Still connecting. Give it a second and try again.',
+  not_authenticated: 'Please sign in with Google to enter this tank.',
   timeout:
-    "The tank didn't answer. Check that both SQL migrations have run, and that " +
-    'your dev server was restarted after .env.local was created.',
+    "The tank didn't answer. Check your connection or verify that Supabase services are reachable.",
   unknown: 'Something went wrong reaching the tank.',
 };
+
+/**
+ * Connect Moment session & broadcast contracts.
+ */
+export type ConnectMomentCategory =
+  | 'meals'
+  | 'study'
+  | 'walks'
+  | 'conversation'
+  | 'rest';
+
+export type ConnectMomentSession = {
+  id: string;
+  category: ConnectMomentCategory;
+  targetDurationMinutes: number;
+  multiplier: number;
+  active: boolean;
+  startedAt: number;
+  initiatorId: string;
+  initiatorName?: string;
+};
+
+export type ConnectMomentStartPayload = {
+  id: string;
+  category: ConnectMomentCategory;
+  targetDurationMinutes: number;
+  multiplier: number;
+  startedAt: number;
+  initiatorId: string;
+  initiatorName?: string;
+};
+
+export type ConnectMomentEndPayload = {
+  id: string;
+  completed: boolean;
+  actualDurationMinutes: number;
+  pointsEarned: number;
+};
+

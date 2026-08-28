@@ -1,10 +1,10 @@
 /**
  * Tuning knobs. These mirror values enforced in
- * supabase/migrations/0001_phase1_rooms_and_fish.sql — change both together.
+ * supabase/migrations/0007_google_auth_multi_tank.sql — change both together.
  */
 
-/** Enforced in join_room(). The handoff code assumes exactly one peer. */
-export const ROOM_CAPACITY = 2;
+/** Enforced in join_room() and multi-tank capacity. */
+export const ROOM_CAPACITY = 5;
 
 /** Enforced in create_room(). 32^8 ~= 1.1e12. */
 export const CODE_LENGTH = 8;
@@ -50,6 +50,21 @@ export const MAX_HEARTS = 20;
 
 /** How many recent memos to show as bubbles when you open the tank. */
 export const MEMO_BACKLOG = 5;
+
+/** Fish Fin Styles */
+export const FIN_STYLES = ['classic', 'fan', 'ribbon', 'dragon', 'spiky'] as const;
+export type FinStyle = (typeof FIN_STYLES)[number];
+
+export const FISH_COLORS = [
+  '#F5B041',
+  '#7FB3D5',
+  '#E74C3C',
+  '#48C9B0',
+  '#AF7AC5',
+  '#F39C12',
+  '#5DADE2',
+  '#58D68D',
+] as const;
 
 /** Must match the rooms.tank_mood check constraint. */
 export const TANK_MOODS = ['calm', 'deep', 'bright', 'murky', 'warm'] as const;
@@ -129,6 +144,93 @@ export const NUDGE_BATCH_LIMIT = 25;
 /** Matches the rooms.nudge_text check constraint (0006). */
 export const NUDGE_MAX_LEN = 200;
 
+<<<<<<< Updated upstream
+=======
+/** Voucher Categories and Labels */
+export const VOUCHER_CATEGORIES = [
+  'all',
+  'coffee',
+  'dining',
+  'wellness',
+  'culture',
+  'retail',
+  'general',
+] as const;
+
+export const VOUCHER_CATEGORY_LABELS: Record<string, string> = {
+  all: 'All Vouchers',
+  coffee: 'Coffee & Tea',
+  dining: 'Dining & Sweets',
+  wellness: 'Wellness & Spa',
+  culture: 'Culture & Books',
+  retail: 'Shops & Crafts',
+  general: 'General Rewards',
+};
+
+/** Connect Moment Categories and Labels */
+export const CONNECT_MOMENT_CATEGORIES = [
+  'meals',
+  'study',
+  'walks',
+  'conversation',
+  'rest',
+] as const;
+export type ConnectMomentCategory = (typeof CONNECT_MOMENT_CATEGORIES)[number];
+
+export const CONNECT_MOMENT_CATEGORY_CONFIG: Record<
+  ConnectMomentCategory,
+  {
+    label: string;
+    icon: string;
+    description: string;
+    defaultMinutes: number;
+    multiplier: number;
+    ambientColor: string;
+  }
+> = {
+  meals: {
+    label: 'Mindful Meal',
+    icon: '🍲',
+    description: 'Savor your meal without screen distractions together.',
+    defaultMinutes: 30,
+    multiplier: 1.5,
+    ambientColor: '#F5B041',
+  },
+  study: {
+    label: 'Deep Focus & Study',
+    icon: '📖',
+    description: 'Shared immersion for reading, deep work, or study.',
+    defaultMinutes: 45,
+    multiplier: 2.0,
+    ambientColor: '#4ECDC4',
+  },
+  walks: {
+    label: 'Nature Stroll & Walk',
+    icon: '🌿',
+    description: 'Step outside together and enjoy the fresh open air.',
+    defaultMinutes: 20,
+    multiplier: 1.5,
+    ambientColor: '#58D68D',
+  },
+  conversation: {
+    label: 'Heart-to-Heart Chat',
+    icon: '💬',
+    description: 'Undivided presence for meaningful dialogue.',
+    defaultMinutes: 25,
+    multiplier: 1.75,
+    ambientColor: '#AF7AC5',
+  },
+  rest: {
+    label: 'Ambient Rest & Nap',
+    icon: '🌙',
+    description: 'Wind down and restore energy in peaceful quiet.',
+    defaultMinutes: 15,
+    multiplier: 1.25,
+    ambientColor: '#5DADE2',
+  },
+};
+
+>>>>>>> Stashed changes
 export function normalizeCode(input: string): string {
   return input.trim().toUpperCase();
 }
@@ -138,3 +240,4 @@ export function isPlausibleCode(input: string): boolean {
   if (code.length !== CODE_LENGTH) return false;
   return [...code].every((char) => CODE_ALPHABET.includes(char));
 }
+
