@@ -67,6 +67,7 @@ export default function RoomClient({ code }: { code: string }) {
   const [activeSession, setActiveSession] =
     useState<ConnectMomentSession | null>(null);
   const [timeCapsulesOpen, setTimeCapsulesOpen] = useState(false);
+  const [audioOpen, setAudioOpen] = useState(false);
   const [participants, setParticipants] = useState<
     Array<{ id: string; displayName?: string; avatarUrl?: string }>
   >([]);
@@ -381,13 +382,15 @@ export default function RoomClient({ code }: { code: string }) {
         <NudgeBanner roomId={roomId} text={nudge.text} at={nudge.at} />
       ) : null}
 
-      {roomId ? (
-        <div className="pointer-events-none fixed inset-x-0 bottom-24 z-30 flex justify-center px-4">
+      {/* Top Right Ambient Audio Listener Popover */}
+      {audioOpen ? (
+        <div className="pointer-events-none fixed inset-x-0 top-20 z-50 flex justify-end px-4 sm:px-6">
           <div className="pointer-events-auto w-full max-w-sm">
             <AmbientAudioListener />
           </div>
         </div>
       ) : null}
+
       {roomId && supabase && userId ? (
         <LoveLanguagePicker
           supabase={supabase}
@@ -452,6 +455,21 @@ export default function RoomClient({ code }: { code: string }) {
         </div>
 
         <div className="kibo-fade-in pointer-events-auto flex flex-wrap items-center justify-end gap-2 sm:gap-3">
+          {/* Ambient Audio Listener Trigger */}
+          <button
+            type="button"
+            onClick={() => setAudioOpen((prev) => !prev)}
+            className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium backdrop-blur-sm transition ${
+              audioOpen
+                ? 'border-teal-400 bg-teal-500/30 text-teal-100'
+                : 'border-white/15 bg-black/25 text-white/80 hover:border-white/30 hover:text-white'
+            }`}
+            title="Toggle on-device ambient audio listener"
+          >
+            <span>🎙️</span>
+            <span>Listen</span>
+          </button>
+
           {/* Connect Moment Trigger Button */}
           <button
             type="button"
