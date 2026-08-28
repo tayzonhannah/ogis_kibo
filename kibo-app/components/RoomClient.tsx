@@ -125,21 +125,14 @@ export default function RoomClient({ code }: { code: string }) {
       const { data } = await supabase
         .from('rooms')
         .select(
-<<<<<<< Updated upstream
-          'tank_mood, nutrient_seconds, co_away_since, nudge_text, last_nudged_at'
-=======
           'name, tank_mood, nutrient_seconds, co_away_since, nudge_text, last_nudged_at'
->>>>>>> Stashed changes
         )
         .eq('id', roomId)
         .single();
       if (!active || !data) return;
       const row = data as Pick<
         RoomRow,
-<<<<<<< Updated upstream
-=======
         | 'name'
->>>>>>> Stashed changes
         | 'tank_mood'
         | 'nutrient_seconds'
         | 'co_away_since'
@@ -152,13 +145,6 @@ export default function RoomClient({ code }: { code: string }) {
         seconds: row.nutrient_seconds,
         coAwaySince: row.co_away_since,
       });
-<<<<<<< Updated upstream
-      // This read is the nudge's entire delivery path until Web Push lands, and
-      // the reason it works is that the effect below also re-runs on
-      // visibilitychange: a cron job that writes at 04:00 has nobody watching,
-      // so "on next open" is literally when this fires.
-=======
->>>>>>> Stashed changes
       setNudge({ text: row.nudge_text, at: row.last_nudged_at });
     };
 
@@ -380,8 +366,6 @@ export default function RoomClient({ code }: { code: string }) {
         </div>
       )}
 
-<<<<<<< Updated upstream
-=======
       {/* Floating Active Connect Moment HUD */}
       {activeSession && userId ? (
         <ConnectMomentHUD
@@ -393,13 +377,10 @@ export default function RoomClient({ code }: { code: string }) {
         />
       ) : null}
 
->>>>>>> Stashed changes
       {roomId ? (
         <NudgeBanner roomId={roomId} text={nudge.text} at={nudge.at} />
       ) : null}
 
-<<<<<<< Updated upstream
-=======
       {roomId ? (
         <div className="pointer-events-none fixed inset-x-0 bottom-24 z-30 flex justify-center px-4">
           <div className="pointer-events-auto w-full max-w-sm">
@@ -407,8 +388,6 @@ export default function RoomClient({ code }: { code: string }) {
           </div>
         </div>
       ) : null}
-
->>>>>>> Stashed changes
       {roomId && supabase && userId ? (
         <LoveLanguagePicker
           supabase={supabase}

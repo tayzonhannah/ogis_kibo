@@ -1,6 +1,4 @@
 import type { LoveLanguage, TankMood } from './constants';
-<<<<<<< Updated upstream
-=======
 
 export type UserProfile = {
   id: string;
@@ -21,7 +19,6 @@ export type ProfileRow = {
   created_at: string;
   updated_at: string;
 };
->>>>>>> Stashed changes
 
 export type RoomRow = {
   id: string;
@@ -51,10 +48,7 @@ export type ParticipantRow = {
    * client-writable field that reaches the model.
    */
   love_language: LoveLanguage | null;
-<<<<<<< Updated upstream
-=======
   profile?: UserProfile;
->>>>>>> Stashed changes
 };
 
 /** Direction is 1 (rightward) or -1 (leftward). */

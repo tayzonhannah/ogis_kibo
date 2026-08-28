@@ -144,8 +144,6 @@ export const NUDGE_BATCH_LIMIT = 25;
 /** Matches the rooms.nudge_text check constraint (0006). */
 export const NUDGE_MAX_LEN = 200;
 
-<<<<<<< Updated upstream
-=======
 /** Voucher Categories and Labels */
 export const VOUCHER_CATEGORIES = [
   'all',
@@ -189,33 +187,33 @@ export const CONNECT_MOMENT_CATEGORY_CONFIG: Record<
   }
 > = {
   meals: {
-    label: 'Mindful Meal',
+    label: 'Shared Meal & Dining',
     icon: '🍲',
-    description: 'Savor your meal without screen distractions together.',
+    description: 'Phones off while eating together. High presence boost.',
     defaultMinutes: 30,
-    multiplier: 1.5,
+    multiplier: 2.0,
     ambientColor: '#F5B041',
   },
   study: {
-    label: 'Deep Focus & Study',
-    icon: '📖',
-    description: 'Shared immersion for reading, deep work, or study.',
+    label: 'Focus & Study Sprint',
+    icon: '📚',
+    description: 'Shared quiet focus block. Productive co-working.',
     defaultMinutes: 45,
-    multiplier: 2.0,
-    ambientColor: '#4ECDC4',
+    multiplier: 1.5,
+    ambientColor: '#48C9B0',
   },
   walks: {
-    label: 'Nature Stroll & Walk',
-    icon: '🌿',
-    description: 'Step outside together and enjoy the fresh open air.',
+    label: 'Outdoor Walk & Stroll',
+    icon: '🚶',
+    description: 'Side-by-side walk without phone distractions.',
     defaultMinutes: 20,
-    multiplier: 1.5,
-    ambientColor: '#58D68D',
+    multiplier: 1.8,
+    ambientColor: '#52BE80',
   },
   conversation: {
-    label: 'Heart-to-Heart Chat',
+    label: 'Heart-to-Heart Talk',
     icon: '💬',
-    description: 'Undivided presence for meaningful dialogue.',
+    description: 'Deep conversation space with zero background scrolling.',
     defaultMinutes: 25,
     multiplier: 1.75,
     ambientColor: '#AF7AC5',
@@ -230,7 +228,6 @@ export const CONNECT_MOMENT_CATEGORY_CONFIG: Record<
   },
 };
 
->>>>>>> Stashed changes
 export function normalizeCode(input: string): string {
   return input.trim().toUpperCase();
 }
